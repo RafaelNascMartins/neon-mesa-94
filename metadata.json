@@ -1,0 +1,8 @@
+{
+  "name": "cd /DataTree",
+  "description": "Dithered industrial top-down shooter: drive into the wasteland, breach the Data Tree and descend deeper into an industrial hell. Guns, blades, a vending-machine merchant and leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
