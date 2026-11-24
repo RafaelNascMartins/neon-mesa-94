@@ -1437,3 +1437,250 @@ html.hand-cursor * {
 .almanac-page {
   scrollbar-color: var(--tab, var(--px-accent)) #0b0a0c;
 }
+
+/* ───────── Soul symbols assembling themselves (see components/SoulIcons.tsx) ───────── */
+.sg-draw {
+  stroke-dasharray: 1 1;
+  animation: sg-draw var(--d, 1s) var(--e, linear) var(--delay, 0s) both;
+}
+.sg-draw.sg-mech {
+  animation-timing-function: cubic-bezier(0.75, 0, 0.25, 1);
+}
+.sg-draw.sg-burn {
+  animation: sg-draw var(--d, 1s) linear both, sg-burnout 0.7s ease-in var(--fade, 1s) both;
+}
+.sg-draw.sg-burn.sg-smoulder {
+  animation: sg-draw var(--d, 1s) linear both, sg-burnout 0.7s ease-in var(--fade, 1s) both,
+    sg-smoulder 0.9s ease-in-out calc(var(--fade, 1s) + 0.7s) infinite;
+}
+.sg-draw.sg-throb {
+  animation: sg-draw var(--d, 1s) var(--e, linear) var(--delay, 0s) both, sg-throb 1.1s ease-out var(--form, 1.3s) infinite;
+}
+.sg-ember {
+  stroke-dasharray: 0.035 2;
+  animation: sg-ember var(--d, 1s) linear both;
+}
+.sg-spike {
+  animation: sg-spike 0.35s ease-out var(--delay, 0s) both;
+}
+.sg-spike.sg-flicker {
+  animation: sg-spike 0.35s ease-out var(--delay, 0s) both,
+    sg-flick var(--flick, 0.4s) ease-in-out calc(var(--delay, 0s) + 0.35s) infinite alternate;
+}
+.sg-pop {
+  animation: sg-pop 0.25s cubic-bezier(0.3, 1.6, 0.5, 1) var(--delay, 0s) both;
+}
+.sg-clank {
+  animation: sg-clank 0.3s ease-out var(--delay, 0s) both;
+}
+.sg-heart-in {
+  animation: sg-heart-in var(--form, 1.3s) linear both;
+}
+.sg-heart-in.sg-beat {
+  animation: sg-heart-in var(--form, 1.3s) linear both, sg-beat 1.1s ease-in-out var(--form, 1.3s) infinite;
+}
+.sg-beat {
+  animation: sg-beat 1.1s ease-in-out infinite;
+}
+.sg-still {
+  animation: none !important;
+}
+
+@keyframes sg-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes sg-ember {
+  0% { stroke-dashoffset: 0.035; opacity: 1; }
+  92% { opacity: 1; }
+  100% { stroke-dashoffset: -0.965; opacity: 0; }
+}
+@keyframes sg-burnout {
+  from { opacity: 1; }
+  to { opacity: 0.22; }
+}
+@keyframes sg-smoulder {
+  0%, 100% { opacity: 0.22; }
+  50% { opacity: 0.4; }
+}
+@keyframes sg-spike {
+  0% { transform: scale(0); stroke: #fff1a8; }
+  50% { transform: scale(1.5); stroke: #ff8a1a; }
+  100% { transform: scale(1); }
+}
+@keyframes sg-flick {
+  from { transform: scale(1); }
+  to { transform: scale(1.3); }
+}
+@keyframes sg-pop {
+  from { transform: scale(0); }
+  to { transform: scale(1); }
+}
+@keyframes sg-clank {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(0, 14px); }
+  50% { transform: translate(0, -6px); }
+  75% { transform: translate(0, 3px); }
+  100% { transform: translate(0, 0); }
+}
+/* Slow fade-in from the dark, beating harder as it surfaces */
+@keyframes sg-heart-in {
+  0% { transform: scale(0.88); opacity: 0; }
+  14% { transform: scale(0.93); opacity: 0.06; }
+  22% { transform: scale(0.89); opacity: 0.1; }
+  40% { transform: scale(0.99); opacity: 0.3; }
+  48% { transform: scale(0.92); opacity: 0.38; }
+  66% { transform: scale(1.05); opacity: 0.65; }
+  74% { transform: scale(0.96); opacity: 0.75; }
+  90% { transform: scale(1.04); opacity: 0.95; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes sg-beat {
+  0% { transform: scale(1); }
+  10% { transform: scale(1.09); }
+  20% { transform: scale(0.98); }
+  30% { transform: scale(1.05); }
+  42%, 100% { transform: scale(1); }
+}
+@keyframes sg-throb {
+  0% { opacity: 0.35; }
+  10% { opacity: 0.85; }
+  30% { opacity: 0.6; }
+  45%, 100% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class*='sg-'] { animation: none !important; }
+  .sg-ember, .sg-burn { display: none; }
+}
+
+/* Soul picker: each soul fades in on its own beat; opacity follows the selection */
+.soul-pick {
+  transition: opacity 0.35s ease;
+  animation: soul-pick-in 0.6s ease-out backwards;
+}
+@keyframes soul-pick-in {
+  from { opacity: 0; }
+}
+
+/* ───────── HUD: bigger integrity cells, dash bar, area title ───────── */
+.hud-cell.hud-cell-lg {
+  width: 28px;
+  height: 16px;
+}
+@media (max-width: 640px) {
+  .hud-cell.hud-cell-lg {
+    width: 20px;
+    height: 12px;
+  }
+}
+
+/* Dash: a wide blue bar at the bottom centre; it brightens and glows when ready */
+.hud-dash-track {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  background: #0b1420;
+  box-shadow: 0 0 0 1px #000, inset 0 0 0 1px rgba(80, 150, 230, 0.25);
+  transform: skewX(-14deg);
+  overflow: hidden;
+}
+.hud-dash-fill {
+  height: 100%;
+  background: linear-gradient(180deg, #4aa8ff 0%, #1f6fd1 100%);
+  transition: width 60ms linear;
+}
+.hud-dash-track[data-ready='true'] {
+  box-shadow: 0 0 0 1px #000, 0 0 12px rgba(90, 180, 255, 0.55);
+}
+.hud-dash-track[data-ready='true'] .hud-dash-fill {
+  background: linear-gradient(180deg, #a9dcff 0%, #3f9bff 100%);
+}
+
+/* Entering a new area: its name, big, in Pixelta */
+.zone-title {
+  gap: 10px;
+  animation: zone-title 3.4s ease both;
+}
+.zone-title-text {
+  font-family: 'Pixelta', var(--font-pixel);
+  font-size: clamp(44px, 9vw, 120px);
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: #e9e4d8;
+  text-shadow: 4px 4px 0 #000, 0 0 28px rgba(255, 120, 40, 0.35);
+}
+.zone-title-rule {
+  width: min(520px, 60vw);
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--hud-accent, #ffaa2b), transparent);
+  animation: zone-rule 3.4s ease both;
+}
+@keyframes zone-title {
+  0% { opacity: 0; transform: translateY(10px); letter-spacing: 0.3em; }
+  12% { opacity: 1; transform: translateY(0); }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes zone-rule {
+  0% { transform: scaleX(0); }
+  18% { transform: scaleX(1); }
+}
+
+/* ───────── Options screen controls ───────── */
+.opt-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  background: #1d1b20;
+  box-shadow: 0 0 0 1px #000;
+  cursor: pointer;
+}
+.opt-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 18px;
+  background: var(--px-accent, #ffaa2b);
+  box-shadow: 0 0 0 1px #000, 2px 2px 0 #000;
+  border: 0;
+}
+.opt-range::-moz-range-thumb {
+  width: 12px;
+  height: 18px;
+  border-radius: 0;
+  background: var(--px-accent, #ffaa2b);
+  box-shadow: 0 0 0 1px #000, 2px 2px 0 #000;
+  border: 0;
+}
+.opt-range::-moz-range-progress {
+  height: 8px;
+  background: var(--px-accent, #ffaa2b);
+}
+.opt-range:focus-visible {
+  outline: 2px solid var(--px-accent, #ffaa2b);
+  outline-offset: 3px;
+}
+.opt-toggle {
+  position: relative;
+  width: 40px;
+  height: 18px;
+  background: #1d1b20;
+  box-shadow: 0 0 0 1px #000;
+  flex-shrink: 0;
+}
+.opt-toggle > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 14px;
+  background: #5a5650;
+  transition: left 0.12s steps(3), background 0.12s;
+}
+.opt-toggle[data-on='true'] > span {
+  left: 22px;
+  background: var(--px-accent, #ffaa2b);
+}
+@media (prefers-reduced-motion: reduce) {
+  .zone-title, .zone-title-rule { animation: none; }
+}

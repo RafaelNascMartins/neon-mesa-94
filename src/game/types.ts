@@ -1,3 +1,5 @@
+import type { SoulId } from './souls';
+
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover' | 'shop';
 
 export type VmItemId =
@@ -53,6 +55,8 @@ export interface BackpackState {
   passives: VmItemId[];
   activeItem: VmItemId | null;
   activeCharge: number;
+  soul: SoulId | null;
+  soulAwakened: boolean;
   hp: number;
   maxHp: number;
   credits: number;
@@ -226,6 +230,9 @@ export interface HudSnapshot {
   activeCharge: number;
   /** Passives installed this run (shown as a row of little icons). */
   passives: VmItemId[];
+  /** Soul (archetype) picked for this run; awakened once 3 matching items are installed. */
+  soul: SoulId | null;
+  soulAwakened: boolean;
   stormActive: boolean;
   cutsceneText: string | null;
   enemiesRemaining: number;

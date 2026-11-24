@@ -14,7 +14,7 @@ import type { SkinId } from './types';
  *  gold_desperado— gold all over, brown trousers, chain + medallion, gold spurs
  *  phantom_mesa  — all black, a bandana over the face (smoke particles come from the engine)
  *
- * Model space: feet at y=0, hat top ≈2.07, facing +Z. Parts: boot_l/r, leg_l/r, poncho_mesh,
+ * Model space: feet at y=0, hat top ≈2.19 (head centre 1.72), facing +Z. Parts: boot_l/r, leg_l/r, poncho_mesh,
  * trim_mesh_*, belt_mesh, arm_l/r, head_mesh, visor_mesh, hat_mesh_brim/crown, hatband_mesh.
  */
 
@@ -135,6 +135,12 @@ function apply(m: Std, look: PartLook) {
 const mat = (color: number, o: Partial<THREE.MeshStandardMaterialParameters> = {}) =>
   new THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0.1, emissive: color, emissiveIntensity: 0.15, flatShading: true, ...o });
 
+/** The head (and everything worn on it) sits this much above the original block model. */
+const HEAD_LIFT = 0.1;
+
+/** Accessories over the face carry this name, so a cutscene can take them off to show the face. */
+export const FACE_ACCESSORY = 'outfit_face';
+
 function box(g: THREE.Object3D, size: [number, number, number], m: THREE.Material, pos: [number, number, number], rot: [number, number, number] = [0, 0, 0]) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), m);
   mesh.position.set(...pos);
@@ -254,17 +260,18 @@ function buildOutfit(id: SkinId): THREE.Group {
     case 'acid_rattler': {
       const lime = mat(0x9ef01a, { emissiveIntensity: 1.0 });
       const dark = mat(0x1a2214);
-      // Respirator over mouth + two canisters
-      box(g, [0.24, 0.12, 0.08], dark, [0, 1.52, 0.2]);
+      // Respirator over mouth + two canisters (front sits past the face mask's nose tip, z 0.245)
+      box(g, [0.24, 0.12, 0.08], dark, [0, 1.52 + HEAD_LIFT, 0.217]).name = FACE_ACCESSORY;
       for (const sx of [-1, 1]) {
         const can = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.12, 8), lime);
         can.rotation.x = Math.PI / 2;
-        can.position.set(sx * 0.12, 1.5, 0.27);
+        can.position.set(sx * 0.12, 1.5 + HEAD_LIFT, 0.27);
+        can.name = FACE_ACCESSORY;
         g.add(can);
       }
       // Rattlesnake tail curling off the back of the hatband
       for (let i = 0; i < 5; i++) {
-        box(g, [0.08 - i * 0.008, 0.06, 0.07], i % 2 ? lime : dark, [0, 1.86 + i * 0.045, -0.32 - i * 0.03], [-0.5, 0, 0]);
+        box(g, [0.08 - i * 0.008, 0.06, 0.07], i % 2 ? lime : dark, [0, 1.86 + HEAD_LIFT + i * 0.045, -0.32 - i * 0.03], [-0.5, 0, 0]);
       }
       // Acid drips down the poncho
       for (let i = 0; i < 7; i++) {
@@ -303,14 +310,18 @@ function buildOutfit(id: SkinId): THREE.Group {
       const cloth = mat(0x120a16, { roughness: 0.95, emissiveIntensity: 0.05 });
       const stitch = mat(0xff1e8a, { emissiveIntensity: 0.9 });
       // Bandana wrapped over the lower face, a point hanging at the front, knot + tails behind
-      box(g, [0.38, 0.16, 0.38], cloth, [0, 1.52, 0]);
+      // (sized to swallow the face mask: nose tip z 0.245, jaw seam 0.37 wide)
+      const face: THREE.Object3D[] = [];
+      face.push(box(g, [0.42, 0.17, 0.44], cloth, [0, 1.52 + HEAD_LIFT, 0.035]));
       const point = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.22, 3), cloth);
       point.rotation.set(Math.PI, Math.PI / 6, 0);
-      point.position.set(0, 1.38, 0.17);
+      point.position.set(0, 1.38 + HEAD_LIFT, 0.23);
       g.add(point);
-      box(g, [0.3, 0.02, 0.02], stitch, [0, 1.6, 0.195]);
-      box(g, [0.1, 0.08, 0.06], cloth, [0, 1.53, -0.21]);
-      for (const sx of [-1, 1]) box(g, [0.05, 0.22, 0.03], cloth, [sx * 0.05, 1.4, -0.23], [0.3, 0, sx * 0.3]);
+      face.push(point);
+      face.push(box(g, [0.3, 0.02, 0.02], stitch, [0, 1.6 + HEAD_LIFT, 0.262]));
+      face.push(box(g, [0.1, 0.08, 0.06], cloth, [0, 1.53 + HEAD_LIFT, -0.215]));
+      for (const sx of [-1, 1]) face.push(box(g, [0.05, 0.22, 0.03], cloth, [sx * 0.05, 1.4 + HEAD_LIFT, -0.24], [0.3, 0, sx * 0.3]));
+      for (const o of face) o.name = FACE_ACCESSORY;
       // Tattered hem on the poncho
       for (let i = 0; i < 12; i++) {
         const a = (i / 12) * Math.PI * 2;
@@ -381,6 +392,10 @@ export function applyHeroOutfit(hero: THREE.Object3D, id: SkinId) {
     if (part) apply(m, part);
   });
   hero.add(buildOutfit(id));
+  // Phantom Mesa wears its poncho torn to rags: the tidy fringe would sit on top of the tatters
+  hero.traverse((o) => {
+    if (o.name.startsWith('poncho_fringe')) o.visible = id !== 'phantom_mesa';
+  });
 }
 
 /** Ambient particle style per skin (the engine emits them around the hero). */

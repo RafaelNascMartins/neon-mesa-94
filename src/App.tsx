@@ -7,6 +7,7 @@ import { HandCursor } from './components/HandCursor';
 import { GameOverModal, PauseModal } from './components/GameModals';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { SkinsModal } from './components/SkinsModal';
+import { SoulSelect } from './components/SoulSelect';
 import { TerminalBoot } from './components/TerminalBoot';
 import { TitleScreen } from './components/TitleScreen';
 import { VmDialog } from './components/VmDialog';
@@ -14,6 +15,8 @@ import type { AchievementDef } from './game/achievements';
 import { synthAudio } from './game/audio';
 import { PLAYER_MAX_HP } from './game/config';
 import { NeonMesaEngine } from './game/engine';
+import type { SoulId } from './game/souls';
+import { loadOptions, saveOptions, type GameOptions } from './game/options';
 import {
   fetchLeaderboard,
   loadPlayerProgress,
@@ -49,6 +52,8 @@ const INITIAL_HUD: HudSnapshot = {
   activeItem: null,
   activeCharge: 0,
   passives: [],
+  soul: null,
+  soulAwakened: false,
   stormActive: false,
   cutsceneText: null,
   enemiesRemaining: 0,
@@ -113,6 +118,20 @@ export default function App() {
   }));
   const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
   const [muted, setMuted] = useState(false);
+  // Options (pause menu): volumes, screen shake, film grain — saved in the browser
+  const [options, setOptions] = useState<GameOptions>(() => loadOptions());
+  const applyOptions = useCallback((o: GameOptions) => {
+    synthAudio.setVolumes({ master: o.masterVolume, music: o.musicVolume, sfx: o.sfxVolume });
+    engineRef.current?.setVisualOptions(o);
+  }, []);
+  const handleChangeOptions = useCallback(
+    (next: GameOptions) => {
+      setOptions(next);
+      saveOptions(next);
+      applyOptions(next);
+    },
+    [applyOptions]
+  );
   const manualTouchOverride = useRef(false);
   const [touchEnabled, setTouchEnabled] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -148,18 +167,34 @@ export default function App() {
     }
   }, []);
 
+  // Every run starts by picking a soul (archetype); the run itself begins on pick
+  const [choosingSoul, setChoosingSoul] = useState(false);
   const handleStart = useCallback(() => {
     setShowSkins(false);
     setShowLeaderboard(false);
-    setRunSummary(null);
+    setBackpack(null);
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
-    engineRef.current?.startNewRun();
+    engineRef.current?.setPaused(true); // freeze a live run while the picker is up
+    setChoosingSoul(true);
+  }, []);
+  const handlePickSoul = useCallback((soul: SoulId) => {
+    setChoosingSoul(false);
+    setRunSummary(null);
+    engineRef.current?.startNewRun(1, soul);
   }, []);
 
   // From the title, a run boots through the terminal sequence first
   const [booting, setBooting] = useState(false);
+  // Dev: ?ending=odio waits for a click, then plays the Ódio ending (audio unlocked by the click)
+  const [devEnding, setDevEnding] = useState(false);
+  const startDevEnding = useCallback(() => {
+    setDevEnding(false);
+    synthAudio.unlock();
+    engineRef.current?.startNewRun(1, 'odio');
+    engineRef.current?.playHateEnding();
+  }, []);
   const startBoot = useCallback(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setShowSkins(false);
@@ -227,9 +262,13 @@ export default function App() {
           const waveNum = Number(params.get('wave') || '1');
           engine.startNewRun(Number.isFinite(waveNum) && waveNum >= 1 ? waveNum : 1);
         }
+        // Dev only: ?ending=odio jumps straight into the Ódio ending (no final boss yet)
+        // Starts on a click: opened straight from a link, the browser blocks audio until then
+        if (import.meta.env.DEV && params.get('ending') === 'odio') setDevEnding(true);
       },
     });
     engineRef.current = engine;
+    applyOptions(loadOptions());
     // Dev-only handle for automated playtests (stripped from production builds)
     if (import.meta.env.DEV) (window as unknown as { __engine?: NeonMesaEngine }).__engine = engine;
 
@@ -243,6 +282,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (choosingSoul) return; // the soul picker owns the keyboard
 
       if (e.code === 'KeyN') {
         handleToggleMute();
@@ -284,7 +324,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [phase, handleToggleMute, backpack]);
+  }, [phase, handleToggleMute, backpack, choosingSoul]);
 
   const openLeaderboard = useCallback(() => {
     setShowLeaderboard(true);
@@ -296,7 +336,7 @@ export default function App() {
       {/* Dedicated isolated WebGL canvas container */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
 
-      {phase === 'title' && !booting && (
+      {phase === 'title' && !booting && !choosingSoul && (
         <TitleScreen
           bestScore={progress.bestScore}
           equippedSkin={progress.equippedSkin}
@@ -351,15 +391,22 @@ export default function App() {
         />
       )}
 
-      {phase === 'paused' && !backpack && (
+      {phase === 'paused' && !backpack && !choosingSoul && (
         <PauseModal
+          options={options}
+          onChangeOptions={handleChangeOptions}
+          touchEnabled={touchEnabled}
+          onToggleTouch={() => {
+            manualTouchOverride.current = true;
+            setTouchEnabled((v) => !v);
+          }}
           onResume={() => engineRef.current?.setPaused(false)}
           onRestart={handleStart}
           onQuitToTitle={() => engineRef.current?.returnToTitle()}
         />
       )}
 
-      {phase === 'gameover' && runSummary && (
+      {phase === 'gameover' && runSummary && !choosingSoul && (
         <GameOverModal
           summary={runSummary}
           onPlayAgain={handleStart}
@@ -383,6 +430,19 @@ export default function App() {
       <HandCursor />
 
       {toasts.length > 0 && <AchievementToast key={toasts[0].id} def={toasts[0]} onDone={dismissToast} />}
+
+      {choosingSoul && <SoulSelect onPick={handlePickSoul} />}
+
+      {devEnding && (
+        <button
+          type="button"
+          autoFocus
+          onClick={startDevEnding}
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black font-terminal text-[28px] tracking-[0.2em] text-[#8f897d] hover:text-[#e9e4d8]"
+        >
+          CLIQUE PARA ASSISTIR
+        </button>
+      )}
 
       {booting && (
         <TerminalBoot

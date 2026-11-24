@@ -77,6 +77,33 @@ export type Boss2Clip = keyof typeof BOSS2_CLIPS;
 export const BOSS2_LINE_1: Boss2Clip[] = ['whatDidISaid', 'you', 'fucking', 'org', 'anic'];
 export const BOSS2_LINE_2: Boss2Clip[] = ['i', 'will', 'splash', 'you2', 'like', 'a', 'bug'];
 const ACHIEVEMENT_URL = `${ASSET_BASE}achivment.mp3`;
+/** Soul symbols: each plays as its symbol assembles (see playSoulForm). */
+export type SoulSound = 'caos' | 'controle' | 'odio';
+const SOUL_SOUND_URLS: Record<SoulSound, string> = {
+  caos: `${ASSET_BASE}caos.mp3`,
+  controle: `${ASSET_BASE}controle.mp3`,
+  odio: `${ASSET_BASE}odio.mp3`,
+};
+/**
+ * odio.mp3 beats steadily (~1/s) until ~7.4s, then races. Looping 4 steady beats keeps it calm:
+ * both points sit in the same quiet gap just before a beat, so the seam doesn't click.
+ */
+const ODIO_LOOP = { start: 2.505, end: 6.451 };
+/** One-shot clips for the endings. */
+/** A playing ending clip: call it to stop (with a fade); `fadeTo` glides its volume. */
+export type EndingClip = ((fadeSec?: number) => void) & { fadeTo(gain: number, sec: number): void };
+
+export type EndingSample = 'cowboyTalk' | 'pcReboot' | 'pcBootUp' | 'maskFall' | 'chomp' | 'finalScene' | 'deathShatter' | 'youDied';
+const ENDING_SAMPLE_URLS: Record<EndingSample, string> = {
+  cowboyTalk: `${ASSET_BASE}cowboy_falando.mp3`,
+  pcReboot: `${ASSET_BASE}pc_reiniciando.mp3`,
+  pcBootUp: `${ASSET_BASE}pc_religando.mp3`,
+  maskFall: `${ASSET_BASE}mascara_caindo.mp3`,
+  chomp: `${ASSET_BASE}chomp.mp3`,
+  finalScene: `${ASSET_BASE}final_scene.mp3`,
+  deathShatter: `${ASSET_BASE}morte.mp3`, // glass breaking: the player dies
+  youDied: `${ASSET_BASE}youdied.mp3`, // the death screen's music
+};
 // The Frutiger Aero world after "trying another way": a sunny deep house loop
 const AERO_TRACK_URL = `${ASSET_BASE}aurec-deep-house-577898.mp3`;
 const VM_TRACK_URL = `${ASSET_BASE}VM/musinova-ambient-minimal-techno-background-drumless-ambient-loop-538527.mp3`;
@@ -262,6 +289,8 @@ class SynthAudioEngine {
   private vmTrackSource: AudioBufferSourceNode | null = null;
   private vmTrackGain: GainNode | null = null;
   private achievementBuffer: AudioBuffer | null = null;
+  private soulBuffers: Partial<Record<SoulSound, Promise<AudioBuffer>>> = {};
+  private endingBuffers: Partial<Record<EndingSample, Promise<AudioBuffer>>> = {};
   private aeroTrackBuffer: AudioBuffer | null = null;
   private aeroTrackSource: AudioBufferSourceNode | null = null;
   private aeroTrackGain: GainNode | null = null;
@@ -272,7 +301,15 @@ class SynthAudioEngine {
   private vmLoading: Promise<void> | null = null;
   private vmSources: AudioBufferSourceNode[] = [];
 
+  // Player volume (Options), applied on stages after the game's own buses so ducking/fades
+  // inside the game never fight the player's setting
+  private userVolume = { master: 1, music: 1, sfx: 1 };
+  private userMaster: GainNode | null = null;
+  private userMusic: GainNode | null = null;
+  private userSfx: GainNode | null = null;
+
   private static readonly MASTER_LEVEL = 0.72;
+  private static readonly SFX_LEVEL = 0.8;
   private static readonly MUSIC_LEVEL = 0.46;
 
   private ensureContext(): AudioContext | null {
@@ -294,7 +331,10 @@ class SynthAudioEngine {
 
       this.masterGain = ctx.createGain();
       this.masterGain.gain.value = this.muted ? 0 : SynthAudioEngine.MASTER_LEVEL;
-      this.masterGain.connect(comp);
+      this.userMaster = ctx.createGain();
+      this.userMaster.gain.value = this.userVolume.master;
+      this.masterGain.connect(this.userMaster);
+      this.userMaster.connect(comp);
 
       // Music → slow-mo low-pass → master (muffles the soundtrack during kill slow-motion)
       this.musicSlowMoFilter = ctx.createBiquadFilter();
@@ -304,7 +344,10 @@ class SynthAudioEngine {
       this.musicSlowMoFilter.connect(this.masterGain);
       this.musicGain = ctx.createGain();
       this.musicGain.gain.value = SynthAudioEngine.MUSIC_LEVEL;
-      this.musicGain.connect(this.musicSlowMoFilter);
+      this.userMusic = ctx.createGain();
+      this.userMusic.gain.value = this.userVolume.music;
+      this.musicGain.connect(this.userMusic);
+      this.userMusic.connect(this.musicSlowMoFilter);
 
       this.analyser = ctx.createAnalyser();
       this.analyser.fftSize = 512;
@@ -313,8 +356,11 @@ class SynthAudioEngine {
       this.musicGain.connect(this.analyser);
 
       this.sfxGain = ctx.createGain();
-      this.sfxGain.gain.value = 0.8;
-      this.sfxGain.connect(this.masterGain);
+      this.sfxGain.gain.value = SynthAudioEngine.SFX_LEVEL;
+      this.userSfx = ctx.createGain();
+      this.userSfx.gain.value = this.userVolume.sfx;
+      this.sfxGain.connect(this.userSfx);
+      this.userSfx.connect(this.masterGain);
 
       // White noise source buffer (snares, hats, whispers, explosions)
       const length = ctx.sampleRate * 2;
@@ -424,6 +470,16 @@ class SynthAudioEngine {
         this.bossTrackBuffer = buf;
       })
       .catch((err) => console.warn('[audio] boss track failed to load', err));
+    for (const id of Object.keys(SOUL_SOUND_URLS) as SoulSound[]) {
+      const p = decode(SOUL_SOUND_URLS[id]);
+      p.catch((err) => console.warn(`[audio] soul sound "${id}" failed to load`, err));
+      this.soulBuffers[id] = p;
+    }
+    for (const id of Object.keys(ENDING_SAMPLE_URLS) as EndingSample[]) {
+      const p = decode(ENDING_SAMPLE_URLS[id]);
+      p.catch((err) => console.warn(`[audio] ending clip "${id}" failed to load`, err));
+      this.endingBuffers[id] = p;
+    }
     decode(ACHIEVEMENT_URL)
       .then((buf) => {
         this.achievementBuffer = buf;
@@ -497,6 +553,154 @@ class SynthAudioEngine {
     }
     const now = ctx.currentTime;
     [880, 1175, 1568].forEach((f, i) => this.whine(now + i * 0.09, f, f, 0.18, 0.12, 'square'));
+  }
+
+  /**
+   * A soul symbol assembling over `formSec` seconds:
+   *  - caos plays while the fire runs, then fades out once the symbol is whole
+   *  - controle hits the moment the last beam locks in
+   *  - odio swells from silence along with the heartbeat fade-in
+   * With `hold`, odio keeps beating (looping its steady part) until stopped.
+   * Returns a stop(fadeSec) handle.
+   */
+  public playSoulForm(soul: SoulSound, formSec: number, hold = false, level = 0.9): (fadeSec?: number) => void {
+    let stopped = false;
+    let stopNow: ((fadeSec: number) => void) | null = null;
+    const ctx = this.muted ? null : this.ensureContext();
+    const pending = this.soulBuffers[soul];
+    if (!ctx || !this.sfxGain || !pending) return () => {};
+    const out = this.sfxGain;
+    const requested = ctx.currentTime;
+
+    pending
+      .then((buf) => {
+        if (stopped) return;
+        // If the file was still loading, keep the timing relative to when the symbol started
+        const now = ctx.currentTime;
+        const late = now - requested;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        // `g` carries the per-soul envelope (ramps, Ódio's swell curve); `fade` is only ever
+        // touched by stop(), so the two automations can never collide
+        const g = ctx.createGain();
+        const fade = ctx.createGain();
+        src.connect(g);
+        g.connect(fade);
+        fade.connect(out);
+        if (soul === 'caos') {
+          if (late >= formSec + 0.4) return; // already formed: too late to burn along
+          g.gain.setValueAtTime(level, now);
+          const fadeAt = now + Math.max(0, formSec + 0.4 - late);
+          g.gain.setValueAtTime(level, fadeAt);
+          g.gain.linearRampToValueAtTime(0, fadeAt + 1.2);
+          src.start(now, Math.min(late, buf.duration));
+          src.stop(fadeAt + 1.3);
+        } else if (soul === 'controle') {
+          g.gain.setValueAtTime(level, now);
+          src.start(now + Math.max(0, formSec - late));
+        } else {
+          const swell = formSec + 0.5; // rises with the symbol's fade-in
+          const startLevel = Math.min(1, late / swell) * level;
+          // Ease in along a quadratic curve: stays low at first, then rises as the symbol surfaces
+          const rest = Math.max(0.05, swell - late);
+          const from = Math.sqrt(startLevel / level);
+          const curve = new Float32Array(32).map((_, k) => level * (from + (1 - from) * (k / 31)) ** 2);
+          g.gain.setValueCurveAtTime(curve, now, rest);
+          if (hold && buf.duration > ODIO_LOOP.end) {
+            src.loop = true;
+            src.loopStart = ODIO_LOOP.start;
+            src.loopEnd = ODIO_LOOP.end;
+          }
+          src.start(now);
+        }
+        stopNow = (fadeSec) => {
+          const t = ctx.currentTime;
+          try {
+            fade.gain.setValueAtTime(1, t);
+            fade.gain.linearRampToValueAtTime(0, t + fadeSec);
+          } catch {
+            fade.disconnect();
+          }
+          try {
+            src.stop(t + fadeSec + 0.05);
+          } catch {
+            /* already stopped */
+          }
+        };
+      })
+      .catch(() => {});
+
+    // Called from React cleanups: a sound hiccup must never take the screen down with it
+    return (fadeSec = 0.4) => {
+      stopped = true;
+      try {
+        stopNow?.(fadeSec);
+      } catch (err) {
+        console.warn('[audio] soul sound stop failed', err);
+      }
+    };
+  }
+
+  /**
+   * Endings play with no music under them, so their effects need to sit louder in the mix:
+   * scales the whole effects bus (1 = normal).
+   */
+  public setCinematicBoost(k: number) {
+    if (!this.sfxGain || !this.ctx) return;
+    this.sfxGain.gain.setTargetAtTime(SynthAudioEngine.SFX_LEVEL * k, this.ctx.currentTime, 0.15);
+  }
+
+  /**
+   * Plays one of the ending clips (waits for it if it's still loading). With `loop` it repeats
+   * until stopped. Returns a stop(fadeSec) handle.
+   */
+  public playEndingSample(id: EndingSample, gain = 0.9, loop = false): EndingClip {
+    const ctx = this.muted ? null : this.ensureContext();
+    const pending = this.endingBuffers[id];
+    if (!ctx || !this.sfxGain || !pending) {
+      console.warn(`[audio] "${id}" skipped: ${this.muted ? 'muted' : !ctx ? 'no context' : !pending ? 'clip not loading' : 'no bus'}`);
+      return Object.assign(() => {}, { fadeTo: () => {} });
+    }
+    console.info(`[audio] play "${id}" (context ${ctx.state})`);
+    const out = this.sfxGain;
+    let stopped = false;
+    let node: { src: AudioBufferSourceNode; g: GainNode } | null = null;
+    pending
+      .then((buf) => {
+        if (stopped) return;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.loop = loop;
+        const g = ctx.createGain();
+        g.gain.value = gain;
+        src.connect(g);
+        g.connect(out);
+        src.start();
+        node = { src, g };
+      })
+      .catch(() => {});
+    const stop = (fadeSec = 0.15) => {
+      stopped = true;
+      if (!node) return;
+      try {
+        const t = ctx.currentTime;
+        node.g.gain.cancelScheduledValues(t);
+        node.g.gain.setValueAtTime(node.g.gain.value, t);
+        node.g.gain.linearRampToValueAtTime(0, t + fadeSec);
+        node.src.stop(t + fadeSec + 0.02);
+      } catch {
+        /* already stopped */
+      }
+    };
+    return Object.assign(stop, {
+      fadeTo: (to: number, sec: number) => {
+        if (!node || stopped) return;
+        const t = ctx.currentTime;
+        node.g.gain.cancelScheduledValues(t);
+        node.g.gain.setValueAtTime(node.g.gain.value, t);
+        node.g.gain.linearRampToValueAtTime(to, t + sec);
+      },
+    });
   }
 
   /** Coin pickup: tiny tick for copper, bright ding for gold, papery riffle for cash. */
@@ -1101,11 +1305,26 @@ class SynthAudioEngine {
   }
 
   public unlock() {
-    this.ensureContext();
+    const ctx = this.ensureContext();
+    console.info(`[audio] unlock: context ${ctx ? ctx.state : 'unavailable'}${this.muted ? ' (muted)' : ''}`);
+  }
+
+  /** For diagnostics: the audio context's state ('none' before it exists). */
+  public contextState(): string {
+    return this.ctx ? this.ctx.state : 'none';
   }
 
   public isMuted(): boolean {
     return this.muted;
+  }
+
+  /** Player volumes from Options (0..1 each). */
+  public setVolumes(v: { master: number; music: number; sfx: number }) {
+    this.userVolume = { ...v };
+    const t = this.ctx?.currentTime ?? 0;
+    this.userMaster?.gain.setTargetAtTime(v.master, t, 0.03);
+    this.userMusic?.gain.setTargetAtTime(v.music, t, 0.03);
+    this.userSfx?.gain.setTargetAtTime(v.sfx, t, 0.03);
   }
 
   public setMuted(muted: boolean) {

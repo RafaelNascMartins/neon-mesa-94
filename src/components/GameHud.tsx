@@ -1,6 +1,10 @@
+import { useEffect, useRef, useState } from 'react';
 import { Gamepad2, Pause, RefreshCw, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { SKIN_MAP, WEAPONS } from '../game/config';
 import type { ArenaZone, HudSnapshot, WeaponId } from '../game/types';
+import { countSoulItems, SOUL_AWAKEN_COUNT } from '../game/souls';
+import { synthAudio } from '../game/audio';
+import { SOUL_FORM_TIME, SoulGlyph } from './SoulIcons';
 import { ItemIcon, MedKitIcon, WeaponIcon } from './SvgIcons';
 import { TouchControls } from './TouchControls';
 
@@ -52,6 +56,30 @@ function ScoreDigits({ value }: { value: number }) {
   );
 }
 
+/**
+ * Entering a new area: its name, big, in Pixelta, across the middle of the screen for a few
+ * seconds (also when the HUD first comes up at the start of a run).
+ */
+function ZoneTitle({ zone, label }: { zone: ArenaZone; label: string }) {
+  const [shown, setShown] = useState<{ label: string; key: number } | null>(null);
+  const last = useRef<ArenaZone | null>(null);
+  useEffect(() => {
+    if (last.current === zone) return;
+    last.current = zone;
+    setShown({ label, key: Date.now() });
+    const t = window.setTimeout(() => setShown(null), 3400);
+    return () => window.clearTimeout(t);
+  }, [zone, label]);
+  if (!shown) return null;
+  return (
+    <div key={shown.key} className="zone-title fixed inset-x-0 top-[30%] flex flex-col items-center pointer-events-none">
+      <span className="zone-title-rule" />
+      <span className="zone-title-text">{shown.label}</span>
+      <span className="zone-title-rule" />
+    </div>
+  );
+}
+
 export function GameHud({
   hud,
   muted,
@@ -67,6 +95,17 @@ export function GameHud({
   onDash,
   onTalkVm,
 }: GameHudProps) {
+  // The soul awakening mid-run: its symbol re-forms in the HUD, so its sound plays along
+  useEffect(() => {
+    if (!hud.soul || !hud.soulAwakened) return;
+    const stop = synthAudio.playSoulForm(hud.soul, SOUL_FORM_TIME[hud.soul]);
+    // Mid-fight it's just a flourish: fade out before Ódio's heartbeat starts racing
+    const t = window.setTimeout(() => stop(1.5), (SOUL_FORM_TIME[hud.soul] + 2.5) * 1000);
+    return () => {
+      window.clearTimeout(t);
+      stop(0.5);
+    };
+  }, [hud.soul, hud.soulAwakened]);
   // Intro cutscene runs full-screen with no HUD
   if (hud.cinematic) return null;
 
@@ -122,29 +161,35 @@ export function GameHud({
       <div className="flex items-start justify-between p-2.5 sm:p-4 gap-2 sm:gap-4">
         {/* Top-left: sector status */}
         <div className="hud-panel px-2.5 py-2 sm:px-3.5 sm:py-2.5 flex flex-col gap-2 min-w-0">
-          <div className="flex items-baseline gap-2.5 whitespace-nowrap">
-            <span className="hud-title text-[13px] sm:text-lg hud-accent-text">{zoneLabel}</span>
-            {inTree ? (
-              <span className="hud-label">PROFUNDIDADE {hud.treeDepth}</span>
-            ) : (
-              hud.sectorTotalRounds > 1 && (
-                <span className="hud-label">
-                  ROUND {hud.sectorRound}/{hud.sectorTotalRounds}
-                </span>
-              )
-            )}
-            {hud.stormActive && <span className="hud-chip hud-pulse">TEMPESTADE</span>}
-          </div>
+          {(inTree || hud.stormActive) && (
+            <div className="flex items-baseline gap-2.5 whitespace-nowrap">
+              {inTree && <span className="hud-label">PROFUNDIDADE {hud.treeDepth}</span>}
+              {hud.stormActive && <span className="hud-chip hud-pulse">TEMPESTADE</span>}
+            </div>
+          )}
 
-          {/* Integrity cells */}
-          <div className="flex items-center gap-2.5" aria-label={`Integridade ${hud.hp} de ${hud.maxHp}`}>
-            <span className="hud-label hidden sm:inline">INTEGRIDADE</span>
-            <div className="flex items-center gap-[5px] pl-0.5">
+          {/* Integrity cells (big: it's the one thing you check mid-fight) */}
+          <div className="flex flex-col gap-1.5" aria-label={`Integridade ${hud.hp} de ${hud.maxHp}`}>
+            <span className="hud-label">INTEGRIDADE</span>
+            <div className="flex items-center gap-[7px] pl-1">
               {Array.from({ length: hud.maxHp }).map((_, idx) => (
-                <div key={idx} className="hud-cell" data-on={idx < hud.hp} data-critical={lowHp} />
+                <div key={idx} className="hud-cell hud-cell-lg" data-on={idx < hud.hp} data-critical={lowHp} />
               ))}
             </div>
           </div>
+
+          {/* Soul: symbol + progress toward awakening */}
+          {hud.soul && (
+            <div className="flex items-center gap-1.5" aria-label={hud.soulAwakened ? 'Alma desperta' : 'Alma'}>
+              {/* Assembles at run start, and again (glowing) the moment it awakens */}
+              <SoulGlyph key={hud.soulAwakened ? 'awake' : 'asleep'} soul={hud.soul} className="w-8 h-8" animate live={hud.soulAwakened} glow={hud.soulAwakened} dim={!hud.soulAwakened} />
+              <span className="hud-label tabular-nums">
+                {hud.soulAwakened
+                  ? 'DESPERTA'
+                  : `${Math.min(SOUL_AWAKEN_COUNT, countSoulItems(hud.soul, [...hud.passives, ...(hud.activeItem ? [hud.activeItem] : [])]))}/${SOUL_AWAKEN_COUNT}`}
+              </span>
+            </div>
+          )}
 
           {/* Passive items picked up this run */}
           {hud.passives.length > 0 && (
@@ -169,20 +214,6 @@ export function GameHud({
               </div>
             </div>
           )}
-
-          {/* Wave / hostiles counters */}
-          <div className="flex items-center gap-3 whitespace-nowrap">
-            <span className="flex items-baseline gap-1.5">
-              <span className="hud-label">ONDA</span>
-              <span className="hud-num text-xs sm:text-sm">{String(hud.wave).padStart(2, '0')}</span>
-            </span>
-            <span className="flex items-baseline gap-1.5">
-              <span className="hud-label">HOSTIS</span>
-              <span className="hud-num text-xs sm:text-sm hud-accent-text">
-                {hud.barricade ? '∞' : String(hud.enemiesRemaining).padStart(2, '0')}
-              </span>
-            </span>
-          </div>
 
           {/* 5-stage route progression + tree node path */}
           <div data-testid="tree-path" className="flex flex-col gap-1.5">
@@ -304,6 +335,18 @@ export function GameHud({
           </div>
         </div>
       </div>
+
+      {/* ─────────────── Top centre: hostiles left ─────────────── */}
+      <div className="fixed top-2.5 sm:top-4 inset-x-0 flex justify-center pointer-events-none">
+        <div className="hud-panel px-3.5 py-1.5 flex items-baseline gap-2" aria-label={`Hostis restantes ${hud.enemiesRemaining}`}>
+          <span className="hud-label">HOSTIS</span>
+          <span className="hud-num text-base sm:text-xl hud-accent-text">
+            {hud.barricade ? '∞' : String(hud.enemiesRemaining).padStart(2, '0')}
+          </span>
+        </div>
+      </div>
+
+      <ZoneTitle zone={hud.zone} label={zoneLabel} />
 
       {/* ─────────────── Top center: boss / barricade / banners ─────────────── */}
       {/* Sits below the corner panels so it never collides with them on narrow screens */}
@@ -529,20 +572,20 @@ export function GameHud({
         <div
           data-testid={`weapon-btn-${hud.activeWeapon}`}
           className={`hud-panel ${heatMode === 'vent' ? 'hud-panel-danger' : ''} flex flex-col gap-2 px-2.5 py-2 ${
-            touchEnabled ? 'w-[160px]' : 'w-[176px] sm:w-[190px]'
+            touchEnabled ? 'w-[180px]' : 'w-[210px] sm:w-[250px]'
           }`}
         >
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 min-w-0">
               <span className="hud-key">{activeSlotIndex}</span>
-              <span className="hud-title text-[10px] sm:text-xs truncate">{activeDef.shortName}</span>
+              <span className="hud-title text-[11px] sm:text-sm truncate">{activeDef.shortName}</span>
             </span>
-            <span className="hud-num text-base sm:text-xl hud-accent-text">
+            <span className="hud-num text-lg sm:text-[26px] hud-accent-text">
               {activeAmmoFinite ? String(activeAmmo).padStart(2, '0') : '∞'}
             </span>
           </div>
 
-          <WeaponIcon weapon={hud.activeWeapon} className={touchEnabled ? 'w-full h-12' : 'w-full h-16'} />
+          <WeaponIcon weapon={hud.activeWeapon} className={touchEnabled ? 'w-full h-14' : 'w-full h-20 sm:h-24'} />
 
           {activeAmmoFinite && (
             <div className="hud-track hud-segments h-[5px]" style={{ ['--seg' as string]: '5px' }}>
@@ -584,15 +627,15 @@ export function GameHud({
               }}
               aria-label={`Equipar ${w.name} [${slotNum}]`}
               title={`${w.name} [Q / ${slotNum}]`}
-              className="hud-panel flex flex-col gap-1.5 px-2 py-1.5 w-[96px] cursor-pointer opacity-80 hover:opacity-100"
+              className="hud-panel flex flex-col gap-1.5 px-2.5 py-2 w-[124px] sm:w-[140px] cursor-pointer opacity-80 hover:opacity-100"
             >
               <div className="w-full flex items-center justify-between">
                 <span className="hud-key">{slotNum}</span>
-                <span className="hud-num text-[11px]" style={{ color: 'var(--hud-muted)' }}>
+                <span className="hud-num text-[13px] sm:text-sm" style={{ color: 'var(--hud-muted)' }}>
                   {finite ? String(ammo).padStart(2, '0') : '∞'}
                 </span>
               </div>
-              <WeaponIcon weapon={wId} dimmed className="w-full h-7" />
+              <WeaponIcon weapon={wId} dimmed className="w-full h-10 sm:h-12" />
               {finite && (
                 <div className="hud-track h-[3px] w-full">
                   <div
@@ -623,32 +666,22 @@ export function GameHud({
             </div>
           </div>
         )}
-
-        {/* Dash readiness (desktop) */}
-        {!touchEnabled && (
-          <div className="hidden md:flex hud-panel flex-col gap-2 px-2.5 py-2">
-            {[{ key: 'SPACE', label: 'DASH', ratio: hud.dashReadyRatio }].map((a) => (
-              <div key={a.label} className="flex flex-col gap-1">
-                <span className="flex items-center gap-1.5">
-                  <span className="hud-key">{a.key}</span>
-                  <span className="hud-label" style={{ color: a.ratio >= 1 ? 'var(--hud-bone)' : undefined }}>
-                    {a.label}
-                  </span>
-                </span>
-                <div className="hud-track h-1 w-full">
-                  <div
-                    className="h-full"
-                    style={{
-                      width: pct(a.ratio),
-                      backgroundColor: a.ratio >= 1 ? 'var(--hud-bone)' : 'var(--hud-faint)',
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
+
+      {/* ─────────────── Bottom centre: dash (desktop) ─────────────── */}
+      {!touchEnabled && (
+        <div className="fixed bottom-4 sm:bottom-5 left-1/2 -translate-x-1/2 w-[min(380px,52vw)] flex flex-col items-center gap-1.5 pointer-events-none" aria-label={hud.dashReadyRatio >= 1 ? 'Dash pronto' : 'Dash recarregando'}>
+          <span className="flex items-center gap-1.5">
+            <span className="hud-key">SPACE</span>
+            <span className="hud-label" style={{ color: hud.dashReadyRatio >= 1 ? '#8fd0ff' : undefined }}>
+              DASH
+            </span>
+          </span>
+          <div className="hud-dash-track" data-ready={hud.dashReadyRatio >= 1}>
+            <div className="hud-dash-fill" style={{ width: pct(hud.dashReadyRatio) }} />
+          </div>
+        </div>
+      )}
 
       {/* Mobile / touch dual virtual joysticks */}
       {touchEnabled && (

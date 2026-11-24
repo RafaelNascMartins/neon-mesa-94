@@ -5,6 +5,9 @@ import * as THREE from 'three';
  * Renders the 3D scene to a low-res NearestFilter WebGLRenderTarget (~320-480px wide)
  * and composites onto the screen via a single full-screen quad.
  */
+/** Default film grain + scanline strength (1 = the original, heavier look). */
+export const DEFAULT_GRAIN = 0.55;
+
 export interface DitherPostProcessor {
   renderTarget: THREE.WebGLRenderTarget;
   quadScene: THREE.Scene;
@@ -12,6 +15,8 @@ export interface DitherPostProcessor {
   material: THREE.ShaderMaterial;
   resize: (width: number, height: number, pixelScale?: number) => void;
   setClean: (v: number) => void;
+  /** Film grain + scanline strength (1 = normal). */
+  setGrain: (v: number) => void;
   render: (
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -40,6 +45,7 @@ uniform float uTime;
 uniform float uDamageFlash;
 uniform vec3 uRimColor;
 uniform float uClean; // 0 = grimy industrial grade, 1 = clean glossy Frutiger Aero look
+uniform float uGrain; // film grain + scanlines amount (1 = normal)
 varying vec2 vUv;
 
 float bayer4x4(vec2 pos) {
@@ -122,7 +128,7 @@ void main() {
 
   // Animated film grain (re-rolled ~24 times a second)
   float grain = hash12(pixelCoord + floor(uTime * 24.0) * vec2(17.0, 31.0)) - 0.5;
-  col += grain * 0.085 * (1.0 - uClean * 0.75);
+  col += grain * 0.085 * (1.0 - uClean * 0.75) * uGrain;
 
   // Ordered Bayer 4x4 dithering before color quantization
   float threshold = bayer4x4(pixelCoord);
@@ -130,7 +136,7 @@ void main() {
   vec3 quantized = floor(clamp(dithered, 0.0, 1.0) * uColorSteps + 0.5) / uColorSteps;
 
   // Dirty CRT: scanlines + a faint RGB aperture mask
-  float scanline = 1.0 - 0.14 * (1.0 - uClean * 0.7) * step(0.5, fract(pixelCoord.y * 0.5));
+  float scanline = 1.0 - 0.14 * (1.0 - uClean * 0.7) * uGrain * step(0.5, fract(pixelCoord.y * 0.5));
   float column = mod(pixelCoord.x, 3.0);
   vec3 mask = vec3(column < 1.0 ? 1.06 : 0.96, column >= 1.0 && column < 2.0 ? 1.06 : 0.96, column >= 2.0 ? 1.06 : 0.96);
   quantized *= scanline * mask;
@@ -165,6 +171,7 @@ export function createDitherPostProcessor(
       uDamageFlash: { value: 0 },
       uRimColor: { value: new THREE.Color(0xff5a22) },
       uClean: { value: 0 },
+      uGrain: { value: DEFAULT_GRAIN },
     },
     vertexShader: DITHER_VERTEX,
     fragmentShader: DITHER_FRAGMENT,
@@ -205,6 +212,9 @@ export function createDitherPostProcessor(
     },
     setClean(v: number) {
       material.uniforms.uClean.value = v;
+    },
+    setGrain(v: number) {
+      material.uniforms.uGrain.value = v;
     },
     dispose() {
       renderTarget.dispose();

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { synthAudio, type VmClip } from '../game/audio';
 import type { VmItemId, VmShopState } from '../game/types';
+import { ItemArchetypeMark } from './SoulIcons';
 import { ItemIcon } from './SvgIcons';
 
 /**
@@ -186,6 +187,7 @@ export function VmDialog({ getShop, onBuy, onClose }: VmDialogProps) {
                   style={{ opacity: disabled ? 0.45 : 1 }}
                 >
                   <span className="hud-key absolute top-1.5 left-1.5">{i + 1}</span>
+                  <ItemArchetypeMark id={item.id} className="absolute top-1.5 right-1.5 w-6 h-6" />
                   <ItemIcon id={item.id} className="w-14 h-14 sm:w-16 sm:h-16" />
                   <span className="text-[14px] sm:text-[15px] leading-none uppercase tracking-[0.04em] px-shadow">{item.name}</span>
                   <span className="text-[12px] sm:text-[13px] leading-tight" style={{ color: 'var(--px-muted)' }}>

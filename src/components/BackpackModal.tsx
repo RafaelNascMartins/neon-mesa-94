@@ -6,6 +6,8 @@ import type { BackpackState, VmItemId, WeaponId } from '../game/types';
 import { Almanac } from './Almanac';
 import { CodeIntro } from './CodeText';
 import { PixelText } from './PixelText';
+import { countSoulItems, SOUL_AWAKEN_COUNT, SOUL_MAP } from '../game/souls';
+import { ItemArchetypeMark, SoulGlyph } from './SoulIcons';
 import { ItemIcon, WeaponIcon } from './SvgIcons';
 
 /**
@@ -160,6 +162,24 @@ export function BackpackModal({ state, getTemplate, onClose }: BackpackModalProp
                 )}
               </section>
 
+              {/* Soul */}
+              {state.soul && (
+                <section className="flex flex-col gap-2">
+                  <span className="px-label">Alma</span>
+                  <div className="px-card flex items-center gap-3 p-2.5">
+                    <SoulGlyph soul={state.soul} className="w-12 h-12 shrink-0" animate live glow={state.soulAwakened} />
+                    <div className="flex flex-col gap-1 flex-1">
+                      <span className="text-[14px] leading-none uppercase px-shadow" style={{ color: SOUL_MAP[state.soul].color }}>
+                        {SOUL_MAP[state.soul].name} · {state.soulAwakened ? 'DESPERTA' : `${Math.min(SOUL_AWAKEN_COUNT, countSoulItems(state.soul, [...state.passives, ...(state.activeItem ? [state.activeItem] : [])]))}/${SOUL_AWAKEN_COUNT}`}
+                      </span>
+                      <span className="text-[12px] leading-tight" style={{ color: 'var(--px-muted)' }}>
+                        {state.soulAwakened ? SOUL_MAP[state.soul].awakened : SOUL_MAP[state.soul].base}
+                      </span>
+                    </div>
+                  </div>
+                </section>
+              )}
+
               {/* Passives */}
               <section className="flex flex-col gap-2">
                 <span className="px-label">Passivos ({state.passives.length})</span>
@@ -172,9 +192,10 @@ export function BackpackModal({ state, getTemplate, onClose }: BackpackModalProp
                         title={VM_ITEMS.find((i) => i.id === id)?.name}
                         onClick={() => setSel({ kind: 'item', id })}
                         data-active={isSel({ kind: 'item', id })}
-                        className="px-card vm-card flex items-center justify-center p-1.5 aspect-square"
+                        className="px-card vm-card relative flex items-center justify-center p-1.5 aspect-square"
                       >
                         <ItemIcon id={id} className="w-9 h-9" />
+                        <ItemArchetypeMark id={id} className="absolute top-0.5 right-0.5 w-3.5 h-3.5" />
                       </button>
                     ))}
                   </div>

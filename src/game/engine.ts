@@ -41,7 +41,8 @@ import {
   loadAllGlbAssets,
   type LoadedGlbAssets,
 } from './assets';
-import { BOSS2_LINE_1, BOSS2_LINE_2, DEATH_SCREAM_LEN, synthAudio } from './audio';
+import { BOSS2_LINE_1, BOSS2_LINE_2, DEATH_SCREAM_LEN, synthAudio, type EndingClip } from './audio';
+import { DEFAULT_GRAIN } from './ditherShader';
 import { BossReturnFx } from './bossReturnFx';
 import { TeleportFx } from './teleportFx';
 import { BlastFx } from './blastFx';
@@ -49,6 +50,16 @@ import { applyBrokenExpressions } from './bossFaces';
 import { CoinField, type CoinTier } from './coinDrops';
 import { ACHIEVEMENT_MAP, type AchievementDef, type AchievementId } from './achievements';
 import { savePlayerProgress } from './storage';
+import { isSoulAwakened, SOUL_MAP, type SoulId } from './souls';
+import { HateEndingCutscene, type HateEndingSound } from './hateEnding';
+import { buildHateStage, type HateStage } from './hateStage';
+import { PcRoomScene } from './pcRoom';
+import { DeathFx } from './deathFx';
+
+/** The Ódio ending's set is built here, far past the level (and its fog). */
+const HATE_STAGE_ORIGIN = new THREE.Vector3(0, 0, 700);
+/** …and the room outside the PC, somewhere else entirely. */
+const PC_ROOM_ORIGIN = new THREE.Vector3(0, 0, -700);
 import { aeroGrassTexture, aeroSkyTexture, buildAeroPillar, buildAeroWorld, buildBlobEnemy, buildEmoteSprite, RewriteCutscene, wobbleBlob, type AeroWorld } from './aeroWorld';
 
 interface RunStats {
@@ -231,6 +242,8 @@ interface EnemyEntity {
   frozenT?: number;
   baseSpeed?: number;
   cookie?: boolean;
+  /** Soul of Control (awakened): hits landed on this enemy toward the next lock. */
+  ctrlHits?: number;
   buffIcon?: THREE.Sprite; // "+" over an empowered enemy
   buffed?: boolean;
   bombTimer?: number; // spider death fuse
@@ -452,7 +465,10 @@ export class NeonMesaEngine {
     | 'boss2_intro'
     | 'boss2_death'
     | 'rewrite'
-    | 'aero_intro' =
+    | 'aero_intro'
+    | 'hate_ending'
+    | 'pc_ending'
+    | 'death' =
     'none';
   private cutsceneTimer = 0;
   private cutsceneDuration = 0;
@@ -587,6 +603,26 @@ export class NeonMesaEngine {
   private boss2Stage: 'none' | 'lull' | 'fight' | 'dead' = 'none';
   private boss2Timer = 0;
   private boss2NextBang = 0;
+  // Ódio ending: the cutscene, the beaten boss standing in for it, and its heartbeat
+  private hateEnding: HateEndingCutscene | null = null;
+  private hateBoss: THREE.Group | null = null;
+  private hateHeartStop: ((fadeSec?: number) => void) | null = null;
+  /** The cowboy's voice, running while his line is on screen. */
+  private hateTalkStop: ((fadeSec?: number) => void) | null = null;
+  /** final_scene.mp3, low under the whole cutscene (looped). */
+  private hateMusicStop: EndingClip | null = null;
+  private hateStage: HateStage | null = null;
+  /** Options: camera shake on/off (0/1) and the film grain level. */
+  private shakeScale = 1;
+  private grainLevel = DEFAULT_GRAIN;
+  private pcRoom: PcRoomScene | null = null;
+  /** The player's death: white figure on black, cracking like glass; then the death screen. */
+  private deathFx: DeathFx | null = null;
+  private deathMusic: EndingClip | null = null;
+  private hateSavedSky: { background: THREE.Scene['background']; fog: THREE.Scene['fog'] } | null = null;
+  /** Grab the next rendered frame (the ending's last image, shown on the PC outside). */
+  private captureFramePending = false;
+  private endingFrame: string | null = null;
   private boss2Cine: {
     e: EnemyEntity;
     t: number;
@@ -651,6 +687,9 @@ export class NeonMesaEngine {
   private credits = 0;
   private playerMaxHp = PLAYER_MAX_HP;
   private upgrades = new Set<VmItemId>();
+  /** Soul (archetype) picked for this run, and whether 3 matching items have awakened it. */
+  private soul: SoulId | null = null;
+  private soulAwakened = false;
 
   // Last-kill slow-motion (real-time driven; scales the simulation step)
   private timeScale = 1;
@@ -2194,7 +2233,7 @@ export class NeonMesaEngine {
       hell,
       !cinematic && this.boss2Stage !== 'lull'
     );
-    let f = cinematic ? 1 : lightFactor;
+    let f = this.cutsceneMode === 'hate_ending' || this.cutsceneMode === 'pc_ending' ? 0.05 : cinematic ? 1 : lightFactor;
     if (lull > 0) {
       // The calm before he comes: the rig is dead, the main lights sag and stutter harder and harder
       const chatter = Math.sin(this.elapsedSec * 61) * Math.sin(this.elapsedSec * 17.3);
@@ -2221,6 +2260,14 @@ export class NeonMesaEngine {
       this.damageFlash,
       this.currentRimColorHex
     );
+    if (this.captureFramePending) {
+      this.captureFramePending = false;
+      try {
+        this.endingFrame = this.renderer.domElement.toDataURL('image/jpeg', 0.85);
+      } catch {
+        this.endingFrame = null;
+      }
+    }
 
     this.scheduleNextFrame();
   }
@@ -2367,7 +2414,7 @@ export class NeonMesaEngine {
     this.camPosX += (0 - this.camPosX) * damp;
     this.camPosY += (targetCamY - this.camPosY) * damp;
     this.camPosZ += (targetCamZ - this.camPosZ) * damp;
-    const shakeMag = this.trauma * this.trauma * 0.9;
+    const shakeMag = this.trauma * this.trauma * 0.9 * this.shakeScale;
     this.camera.position.set(
       this.camPosX + (Math.random() * 2 - 1) * shakeMag,
       this.camPosY + (Math.random() * 2 - 1) * shakeMag,
@@ -2572,6 +2619,23 @@ export class NeonMesaEngine {
     if (this.cutsceneMode === 'aero_intro') {
       this.mouseJustPressed = false;
       this.updateAeroIntro(dt);
+      return;
+    }
+    if (this.cutsceneMode === 'hate_ending') {
+      this.mouseJustPressed = false;
+      this.hateEnding?.update(dt);
+      return;
+    }
+    if (this.cutsceneMode === 'pc_ending') {
+      this.mouseJustPressed = false;
+      this.pcRoom?.update(dt);
+      return;
+    }
+    if (this.cutsceneMode === 'death') {
+      this.mouseJustPressed = false;
+      this.deathFx?.update(this.realDt);
+      // the crack has run through him: the death screen
+      if (this.deathFx && this.deathFx.time >= 2.4) this.triggerGameOver();
       return;
     }
     if (this.cutsceneMode !== 'none') {
@@ -2976,7 +3040,7 @@ export class NeonMesaEngine {
     this.camPosY += (desiredY - this.camPosY) * damp;
     this.camPosZ += (desiredZ - this.camPosZ) * damp;
 
-    const shakeMag = this.trauma * this.trauma * 1.48;
+    const shakeMag = this.trauma * this.trauma * 1.48 * this.shakeScale;
     const sx = (Math.random() * 2 - 1) * shakeMag;
     const sy = (Math.random() * 2 - 1) * shakeMag * 0.85;
     const sz = (Math.random() * 2 - 1) * shakeMag * 0.72;
@@ -3576,6 +3640,7 @@ export class NeonMesaEngine {
     const bullet = fromPlayer && splashRadius <= 0 && weapon !== 'railgun' && weapon !== 'harpoon';
     slot.pinballs = bullet && !piercing && this.upgrades.has('pinball') ? 3 : 0;
     if (fromPlayer && this.upgrades.has('ghostAmmo')) slot.damage = Math.round(damage * 0.85);
+    if (fromPlayer && this.soul === 'caos' && this.soulAwakened) slot.damage = Math.round(slot.damage * 1.15);
     const fat = bullet && this.upgrades.has('fatAmmo');
     slot.group.scale.setScalar(fat ? 1.6 : 1);
     if (fat) {
@@ -5533,6 +5598,7 @@ export class NeonMesaEngine {
           if (segmentCircleIntersect(prevX, prevZ, p.x, p.z, e.x, e.z, e.radius + (p.group.scale.x > 1.2 ? 0.55 : 0.22))) {
             this.hitSource = p.weapon;
             if (p.splashRadius <= 0) this.onAmmoHit(e, p.damage);
+            this.onSoulHit(e);
             if (p.piercing) {
               p.piercedIds.add(e.id);
               this.damageEnemy(e, p.damage, p.vx, p.vz);
@@ -5888,6 +5954,8 @@ export class NeonMesaEngine {
       this.activeCharge = Math.min(this.activeMax, this.activeCharge + Math.min(amount, Math.max(0, e.hp), 30));
       if (this.activeCharge >= this.activeMax) synthAudio.playWeaponPickup('plasma', 'reload');
     }
+    // Soul of Hatred: the more you're hurt, the harder you hit
+    if (this.soul === 'odio') amount *= 1 + 0.08 * Math.max(0, this.playerMaxHp - this.playerHp);
     e.hp -= amount;
     // Charm rounds: sometimes the fight just leaves them
     if (e.hp > 0 && this.upgrades.has('charm') && e.archetype !== 'boss' && !e.hexer && Math.random() < 0.08) this.pacifyEnemy(e, 4);
@@ -5967,6 +6035,9 @@ export class NeonMesaEngine {
       }
       // Volatile Rounds: the corpse goes off (queued; processed next frame)
       if (this.upgrades.has('volatile') && e.archetype !== 'boss' && e.archetype !== 'spider') {
+        this.pendingBlasts.push({ x: e.x, z: e.z });
+      } else if (this.soul === 'caos' && e.archetype !== 'boss' && Math.random() < (this.soulAwakened ? 0.4 : 0.15)) {
+        // Soul of Chaos: some corpses go off on their own
         this.pendingBlasts.push({ x: e.x, z: e.z });
       }
 
@@ -6064,11 +6135,63 @@ export class NeonMesaEngine {
     this.playerZ += (dirZ / len) * 0.9;
     this.spawnParticles(this.playerX, 1.1, this.playerZ, 18, 0xff2a55, 9, 0.35);
 
+    // Soul of Hatred (awakened): getting hit lashes out at everyone close
+    if (this.soul === 'odio' && this.soulAwakened && this.playerHp > 0) {
+      this.spawnParticles(this.playerX, 1.0, this.playerZ, 34, 0xb3001e, 13, 0.5);
+      this.fx.puff(this.playerX, 0.6, this.playerZ, 1.1, 0x5a0010);
+      for (const o of this.enemies) {
+        if (o.state === 'ko') continue;
+        const ox = o.x - this.playerX;
+        const oz = o.z - this.playerZ;
+        if (Math.hypot(ox, oz) <= 4.5 + o.radius) this.damageEnemy(o, 40, ox, oz);
+      }
+    }
+
     this.emitHud();
 
     if (this.playerHp <= 0) {
-      this.triggerGameOver();
+      this.beginDeath(dirX, dirZ);
     }
+  }
+
+  /** The killing shot: everything cuts to black, he's left white, and he cracks like glass. */
+  private beginDeath(dirX: number, dirZ: number) {
+    if (this.deathFx || !this.heroModel) {
+      if (!this.heroModel) this.triggerGameOver();
+      return;
+    }
+    this.cancelSlowMo();
+    this.damageFlash = 0;
+    this.trauma = 0;
+    this.hitstopTimer = 0;
+    this.heroShadow.visible = false;
+    this.aimReticleMesh.visible = false;
+    this.overheadReloadGroup.visible = false;
+    this.keys.clear();
+    this.mouseDown = false;
+    this.touchFiring = false;
+    synthAudio.pauseMusic(true);
+    synthAudio.playEndingSample('deathShatter', 1.8);
+    this.deathFx = new DeathFx({
+      scene: this.scene,
+      camera: this.camera,
+      container: this.container,
+      heroModel: this.heroModel,
+      weaponAnchor: this.weaponAnchor,
+      heroRoot: this.heroRoot,
+      hitDir: new THREE.Vector2(dirX, dirZ),
+    });
+    this.cutsceneMode = 'death';
+    this.emitHud();
+  }
+
+  /** Clears the death screen's scene and music (new run / back to the title). */
+  private teardownDeath() {
+    this.deathFx?.dispose();
+    this.deathFx = null;
+    this.deathMusic?.(0.6);
+    this.deathMusic = null;
+    if (this.cutsceneMode === 'death') this.cutsceneMode = 'none';
   }
 
   /** True when a gun you're carrying (not the infinite pistol) is under half ammo. */
@@ -6438,7 +6561,11 @@ export class NeonMesaEngine {
   }
 
   private triggerGameOver() {
+    if (this.phase === 'gameover') return;
     this.cancelSlowMo();
+    // The death screen's music (long and loud: kept low, looped while the screen is up)
+    this.deathMusic?.(0.2);
+    this.deathMusic = synthAudio.playEndingSample('youDied', 0.32, true);
     this.phase = 'gameover';
     document.body.dataset.state = 'gameover';
     synthAudio.pauseMusic(true);
@@ -6462,9 +6589,13 @@ export class NeonMesaEngine {
     });
   }
 
-  public startNewRun(startWave = 1) {
+  public startNewRun(startWave = 1, soul: SoulId | null = this.soul) {
+    this.soul = soul;
+    this.soulAwakened = false;
     // Restarting mid-intro: settle it first so its car ends up parked
     if (this.intro) this.finishIntro();
+    this.teardownHateEnding();
+    this.teardownDeath();
     this.resetAero();
     // Dev jump straight past Cem Faces' second fight lands in the aero world
     if (startWave > BOSS_RETURN_WAVE) {
@@ -6690,6 +6821,14 @@ export class NeonMesaEngine {
     } else if (this.cutsceneMode === 'aero_intro') {
       if (this.aeroIntro && this.aeroIntro.t < 0.4) return;
       this.finishAeroIntro();
+    } else if (this.cutsceneMode === 'hate_ending') {
+      if (this.hateEnding && this.hateEnding.time < 1) return;
+      this.hateEnding?.finish();
+    } else if (this.cutsceneMode === 'pc_ending') {
+      if (this.pcRoom && this.pcRoom.time < 1) return;
+      this.pcRoom?.finish();
+    } else if (this.cutsceneMode === 'death') {
+      return; // dying can't be skipped
     } else {
       this.finishGateCutscene();
     }
@@ -6716,13 +6855,16 @@ export class NeonMesaEngine {
       this.cutsceneMode === 'boss2_intro' ||
       this.cutsceneMode === 'boss2_death' ||
       this.cutsceneMode === 'rewrite' ||
-      this.cutsceneMode === 'aero_intro'
+      this.cutsceneMode === 'aero_intro' ||
+      this.cutsceneMode === 'hate_ending' ||
+      this.cutsceneMode === 'pc_ending' ||
+      this.cutsceneMode === 'death'
     );
   }
 
   /** Points the camera at `target` from `pos`, plus the cutscene's own shake. */
   private cineCamera(pos: THREE.Vector3, target: THREE.Vector3) {
-    const s = this.trauma * this.trauma * 0.9;
+    const s = this.trauma * this.trauma * 0.9 * this.shakeScale;
     this.camera.position.set(
       pos.x + (Math.random() * 2 - 1) * s,
       pos.y + (Math.random() * 2 - 1) * s * 0.7,
@@ -6739,6 +6881,261 @@ export class NeonMesaEngine {
     this.camPosZ = this.camera.position.z;
     this.setLetterbox(0);
     this.setSubtitle(null);
+  }
+
+  // ───────────────────────── Ódio ending ─────────────────────────
+
+  /**
+   * Rolls the Ódio ending. It's staged in its own set (a dead shaft inside the Tree, see
+   * hateStage.ts) built far from the arena. Until the final boss (O Programador) exists, a black
+   * copy of the cowboy stands in for him, beaten and cornered.
+   */
+  public playHateEnding() {
+    if (!this.assets || !this.heroModel || this.hateEnding) return;
+    if (this.phase !== 'playing' && this.phase !== 'paused') return;
+    if (this.intro) this.finishIntro();
+    if (this.phase === 'paused') this.setPaused(false);
+
+    // Clear the floor: nobody else is in this scene
+    while (this.enemies.length > 0) this.removeEnemyAt(0);
+    this.waveQueue = [];
+    for (const p of this.projectiles) {
+      p.active = false;
+      p.group.visible = false;
+    }
+    this.cancelSlowMo();
+    synthAudio.endBossMusic(0.8);
+    synthAudio.pauseMusic(true);
+    // The game's music out; the scene's own sounds sit louder, final_scene.mp3 low underneath
+    synthAudio.setCinematicBoost(1.9);
+    this.hateMusicStop = synthAudio.playEndingSample('finalScene', 0.32, true);
+
+    // The set, with the dead machines lying around
+    const e = this.assets.enemies;
+    const stage = buildHateStage([e.rustler, e.ranger, e.charger, e.juggernaut, e.tesla, e.mantis, e.spider, e.rustler, e.ranger]);
+    stage.group.position.copy(HATE_STAGE_ORIGIN);
+    this.scene.add(stage.group);
+    this.hateStage = stage;
+    // Pitch dark around it: no level fog colour, no level lights
+    this.hateSavedSky = { background: this.scene.background, fog: this.scene.fog };
+    this.scene.background = new THREE.Color(0x020203);
+    this.scene.fog = new THREE.FogExp2(0x020203, 0.012);
+
+    const { root, body } = this.buildHateBoss();
+    this.scene.add(root);
+    this.hateBoss = root;
+
+    this.heroRoot.scale.set(1, 1, 1);
+    this.heroModel.visible = true;
+    this.heroShadow.visible = false;
+    this.overheadReloadGroup.visible = false;
+    this.endingFrame = null;
+
+    this.hateEnding = new HateEndingCutscene({
+      camera: this.camera,
+      aim: (pos, target) => this.cineCamera(pos, target),
+      origin: HATE_STAGE_ORIGIN,
+      stage,
+      heroRoot: this.heroRoot,
+      heroModel: this.heroModel,
+      boss: root,
+      bossBody: body,
+      setLetterbox: (k) => this.setLetterbox(k),
+      setSubtitle: (text) => this.setSubtitle(text),
+      fadeEl: this.cineFadeEl,
+      shake: (a) => {
+        this.trauma = Math.max(this.trauma, a);
+      },
+      weaponCopy: (kind) => this.hateWeaponCopy(kind),
+      captureFrame: () => {
+        this.captureFramePending = true;
+      },
+      play: (id) => this.playHateSound(id),
+      onFinished: () => this.finishHateEnding(),
+    });
+    this.cutsceneMode = 'hate_ending';
+    this.aimReticleMesh.visible = false;
+    this.mouseDown = false;
+    this.emitHud();
+  }
+
+  /** Stand-in for the final boss: the cowboy's silhouette, all black, no visor. */
+  private buildHateBoss(): { root: THREE.Group; body: THREE.Group } {
+    const root = new THREE.Group();
+    const body = cloneModelWithUniqueMaterials(this.assets!.hero);
+    const black = new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 1, metalness: 0 });
+    body.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) m.material = black;
+    });
+    root.add(body);
+    return { root, body };
+  }
+
+  /**
+   * Copies of his guns for the ending: the long gun slung on his back (one he owns, else the
+   * shotgun) or the pistol in his hand (hiding the held one). Not in the scene yet.
+   */
+  private hateWeaponCopy(kind: 'back' | 'hand'): THREE.Object3D | null {
+    const LONG: WeaponId[] = ['shotgun', 'coice', 'railgun', 'plasma', 'rocket', 'nailgun', 'harpoon', 'macarico', 'disco'];
+    const id: WeaponId =
+      kind === 'hand' ? this.activeWeapon : (this.ownedWeapons.find((w) => LONG.includes(w)) ?? 'shotgun');
+    const src = this.weaponModels[id] ?? this.weaponModels.pistol;
+    if (!src) return null;
+    // The gun models are laid out for the hand holder: shifted ~0.34 to the side, barrel reaching
+    // forward. Re-centre the copy on its own middle so it sits on his back / in a hand / on the
+    // floor where it's put, and tumbles about its centre when thrown.
+    const inner = src.clone(true);
+    inner.visible = true;
+    inner.position.set(0, 0, 0);
+    inner.rotation.set(0, 0, 0);
+    inner.scale.setScalar(1);
+    inner.updateMatrixWorld(true);
+    const centre = new THREE.Box3().setFromObject(inner).getCenter(new THREE.Vector3());
+    inner.position.copy(centre).negate();
+    const copy = new THREE.Group();
+    copy.add(inner);
+    copy.scale.setScalar(1.3);
+    if (kind === 'hand') this.weaponAnchor.visible = false;
+    return copy;
+  }
+
+  private playHateSound(id: HateEndingSound) {
+    switch (id) {
+      case 'heartbeat':
+        // The soul's own heartbeat, swelling under the whole scene
+        this.hateHeartStop = synthAudio.playSoulForm('odio', 8, true, 1.7);
+        break;
+      case 'talk':
+        // his voice runs for as long as the line stays up
+        this.hateTalkStop?.(0.08);
+        this.hateTalkStop = synthAudio.playEndingSample('cowboyTalk', 3.2, true);
+        break;
+      case 'talk_end':
+        this.hateTalkStop?.(0.25);
+        this.hateTalkStop = null;
+        break;
+      case 'mask_fall':
+        synthAudio.playEndingSample('maskFall', 0.8);
+        break;
+      case 'chomp':
+        synthAudio.playEndingSample('chomp', 2.2);
+        break;
+      case 'gun_throw':
+        synthAudio.playDash();
+        break;
+      case 'gun_draw':
+        synthAudio.playWeaponPickup('pistol', 'swap');
+        break;
+      case 'gun_land':
+        synthAudio.playCasingTink();
+        synthAudio.playCeilingBang(0.3);
+        break;
+      case 'music_down':
+        // the reveal: the music starts sinking away under it
+        this.hateMusicStop?.fadeTo(0.04, 9);
+        break;
+      case 'grab':
+        synthAudio.playCeilingBang(0.2);
+        break;
+      case 'mask_peel':
+        synthAudio.playPoisonSplat();
+        break;
+      case 'mask_land':
+        synthAudio.playCeilingBang(0.12);
+        break;
+      case 'jaw':
+        // the jaw coming loose: a wet crack
+        synthAudio.playPoisonSplat();
+        synthAudio.playMeleeHit('slam');
+        break;
+      case 'sting':
+        this.hateHeartStop?.(0.05);
+        this.hateHeartStop = null;
+        this.hateMusicStop?.(0.6);
+        this.hateMusicStop = null;
+        synthAudio.playSlowMoImpact();
+        break;
+    }
+  }
+
+  /** Undoes the ending's changes (also used when quitting / restarting mid-cutscene). */
+  private teardownHateEnding() {
+    this.pcRoom?.dispose();
+    this.pcRoom = null;
+    this.ditherPass.setGrain(this.grainLevel);
+    this.hateTalkStop?.(0.1);
+    this.hateTalkStop = null;
+    this.hateMusicStop?.(0.4);
+    this.hateMusicStop = null;
+    if (!this.hateEnding && !this.hateBoss && !this.hateStage && !this.hateSavedSky) return;
+    synthAudio.setCinematicBoost(1);
+    this.heroRoot.visible = true;
+    this.hateHeartStop?.(0.2);
+    this.hateHeartStop = null;
+    this.hateEnding?.restore();
+    this.hateEnding = null;
+    if (this.hateBoss) this.scene.remove(this.hateBoss);
+    this.hateBoss = null;
+    this.hateStage?.dispose();
+    this.hateStage = null;
+    if (this.hateSavedSky) {
+      this.scene.background = this.hateSavedSky.background;
+      this.scene.fog = this.hateSavedSky.fog;
+      this.hateSavedSky = null;
+    }
+    this.weaponAnchor.visible = true;
+    this.heroShadow.visible = true;
+    this.captureFramePending = false;
+    if (this.cutsceneMode === 'hate_ending') this.cutsceneMode = 'none';
+  }
+
+  /** The shaft is done: clear it away (keeping the dark) and cut to the room outside the PC. */
+  private finishHateEnding() {
+    this.hateHeartStop?.(0.2);
+    this.hateHeartStop = null;
+    this.hateTalkStop?.(0.1);
+    this.hateTalkStop = null;
+    this.hateMusicStop?.(0.4);
+    this.hateMusicStop = null;
+    this.hateEnding?.restore();
+    this.hateEnding = null;
+    if (this.hateBoss) this.scene.remove(this.hateBoss);
+    this.hateBoss = null;
+    this.hateStage?.dispose();
+    this.hateStage = null;
+    this.weaponAnchor.visible = true;
+    this.heroRoot.visible = false;
+    this.setSubtitle(null);
+    this.setLetterbox(0);
+    this.trauma = 0; // the lunge's shake stays in there
+    this.ditherPass.setGrain(this.grainLevel * 0.6); // the real world: much less film grain
+
+    this.pcRoom = new PcRoomScene({
+      camera: this.camera,
+      aim: (pos, target) => this.cineCamera(pos, target),
+      origin: PC_ROOM_ORIGIN,
+      parent: this.scene,
+      frame: this.endingFrame,
+      fadeEl: this.cineFadeEl,
+      setSubtitle: (text) => this.setSubtitle(text),
+      play: (id) => {
+        if (id === 'reboot') synthAudio.playEndingSample('pcReboot', 2.2);
+        else if (id === 'bootup') synthAudio.playEndingSample('pcBootUp', 2.6);
+      },
+      onFinished: () => this.finishPcEnding(),
+    });
+    this.endingFrame = null;
+    this.cutsceneMode = 'pc_ending';
+  }
+
+  /** Back to the title (from black). */
+  private finishPcEnding() {
+    this.teardownHateEnding();
+    this.returnToTitle();
+    window.setTimeout(() => {
+      this.cineFadeEl.style.opacity = '0';
+    }, 700);
   }
 
   // ───────────────────────── Cem Faces: intro ─────────────────────────
@@ -9535,15 +9932,43 @@ export class NeonMesaEngine {
       this.activeMax = item.charge ?? 400;
       this.activeCharge = this.activeMax; // comes charged
       this.upgrades.add(id);
+      this.checkSoulAwaken();
       return;
     }
     // Passive: installed for the rest of the run
     this.upgrades.add(id);
+    this.checkSoulAwaken();
     if (id === 'cell') {
       this.playerMaxHp += 1;
       this.playerHp += 1;
     } else if (id === 'firewall') {
       this.firewallReady = true;
+    }
+  }
+
+  /** Three items of the soul's archetype: it awakens (once per run). */
+  private checkSoulAwaken() {
+    if (!this.soul || this.soulAwakened || !isSoulAwakened(this.soul, this.upgrades)) return;
+    this.soulAwakened = true;
+    const def = SOUL_MAP[this.soul];
+    const color = parseInt(def.color.slice(1), 16);
+    this.pickupBanner = `ALMA DESPERTA: ${def.name}`;
+    this.pickupBannerTimer = 3;
+    this.spawnParticles(this.playerX, 1.3, this.playerZ, 30, color, 9, 0.5);
+    this.spawnParticles(this.playerX, 1.3, this.playerZ, 14, 0xffffff, 6, 0.35);
+    synthAudio.playWeaponPickup('plasma', 'equip');
+  }
+
+  /** Soul of Control: every hit slows; awakened, every 4th hit on the same enemy locks it. */
+  private onSoulHit(e: EnemyEntity) {
+    if (this.soul !== 'controle' || e.state === 'ko') return;
+    e.chillT = Math.max(e.chillT ?? 0, 1);
+    if (!this.soulAwakened || e.archetype === 'boss' || (e.frozenT ?? 0) > 0) return;
+    e.ctrlHits = (e.ctrlHits ?? 0) + 1;
+    if (e.ctrlHits >= 4) {
+      e.ctrlHits = 0;
+      e.frozenT = 0.8;
+      this.spawnParticles(e.x, 1.2, e.z, 10, 0x00a2e8, 4, 0.4);
     }
   }
 
@@ -9669,6 +10094,8 @@ export class NeonMesaEngine {
     return {
       weapons: this.ownedWeapons.map((id) => ({ id, ammo: this.ammo[id], maxAmmo: WEAPONS[id].maxAmmo, active: id === this.activeWeapon })),
       passives: [...this.upgrades].filter((id) => VM_ITEMS.find((v) => v.id === id)?.kind !== 'active'),
+      soul: this.soul,
+      soulAwakened: this.soulAwakened,
       activeItem: this.activeItem,
       activeCharge: this.activeItem ? Math.min(1, this.activeCharge / this.activeMax) : 0,
       hp: this.playerHp,
@@ -9723,6 +10150,8 @@ export class NeonMesaEngine {
 
   public returnToTitle() {
     if (this.intro) this.finishIntro();
+    this.teardownHateEnding();
+    this.teardownDeath();
     this.resetAero();
     this.bossCine = null;
     this.removeVmRoom();
@@ -9758,6 +10187,14 @@ export class NeonMesaEngine {
     this.mouseDown = false;
     this.mouseJustPressed = false;
     this.callbacks.onPhaseChange('title');
+  }
+
+  /** Applies the pause menu's Options (camera shake, film grain). */
+  public setVisualOptions(o: { screenShake: boolean; grain: number }) {
+    this.shakeScale = o.screenShake ? 1 : 0;
+    this.grainLevel = o.grain;
+    // outside the PC the grain stays lighter; everywhere else it's the player's level
+    this.ditherPass.setGrain(this.cutsceneMode === 'pc_ending' ? o.grain * 0.6 : o.grain);
   }
 
   public equipSkin(skinId: SkinId) {
@@ -9924,6 +10361,7 @@ export class NeonMesaEngine {
         pz = az / al;
       }
       this.damageEnemy(e, boss ? weapon.damage * 0.5 : weapon.damage, px, pz);
+      this.onSoulHit(e);
       // Blades also throw blood sideways across the cut
       if (!slam) {
         const side = Math.random() < 0.5 ? 1 : -1;
@@ -10065,6 +10503,8 @@ export class NeonMesaEngine {
       activeItem: this.activeItem,
       activeCharge: this.activeItem ? Math.min(1, this.activeCharge / this.activeMax) : 0,
       passives: [...this.upgrades].filter((id) => VM_ITEMS.find((v) => v.id === id)?.kind !== 'active'),
+      soul: this.soul,
+      soulAwakened: this.soulAwakened,
       stormActive: this.stormActive,
       cutsceneText: this.cutsceneText,
       enemiesRemaining: this.enemies.filter((e) => e.state !== 'ko').length + this.waveQueue.length,

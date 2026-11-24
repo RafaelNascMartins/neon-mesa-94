@@ -57,7 +57,7 @@ function mat(
 }
 
 function addPart(
-  parent: THREE.Group,
+  parent: THREE.Object3D,
   name: string,
   geometry: THREE.BufferGeometry,
   material: THREE.Material,
@@ -86,36 +86,112 @@ function buildCowboyHero(): THREE.Group {
   const hatMat = mat(0x4b2b1d, 0.8, 0.1);
   const visorMat = mat(0x22e3d4, 0.18, 0.6, 0x22e3d4, 1.5);
 
-  // Boots
-  addPart(g, 'boot_l', new THREE.BoxGeometry(0.24, 0.36, 0.34), bootMat, [-0.18, 0.18, 0.04]);
-  addPart(g, 'boot_r', new THREE.BoxGeometry(0.24, 0.36, 0.34), bootMat, [0.18, 0.18, 0.04]);
+  // The head sits this much higher than the original block model, on a longer neck: the chin
+  // clears the poncho's collar (y 1.48) instead of sinking into it.
+  const HEAD_LIFT = 0.1;
+  const leatherDark = mat(0x1a0f0c, 0.85, 0.15);
+  const brass = mat(0xc9a24a, 0.35, 0.8);
+  const steelMat = mat(0x8c939c, 0.35, 0.85);
 
-  // Chaps / Legs
-  addPart(g, 'leg_l', new THREE.CylinderGeometry(0.12, 0.11, 0.5, 8), pantsMat, [-0.18, 0.56, 0]);
-  addPart(g, 'leg_r', new THREE.CylinderGeometry(0.12, 0.11, 0.5, 8), pantsMat, [0.18, 0.56, 0]);
+  // Boots: a shaft, a foot with a rounded toe and a heel, the top folded over, a spur.
+  // Details hang off each boot so they follow the leg when it swings; names start with `boot`
+  // so skins tint them as boots.
+  for (const [side, sx] of [['l', -0.18], ['r', 0.18]] as const) {
+    const boot = addPart(g, `boot_${side}`, new THREE.CylinderGeometry(0.11, 0.115, 0.3, 10), bootMat, [sx, 0.21, 0.0]);
+    addPart(boot, `boot_${side}_foot`, new THREE.BoxGeometry(0.2, 0.11, 0.3), bootMat, [0, -0.1, 0.06]);
+    addPart(boot, `boot_${side}_toe`, new THREE.CylinderGeometry(0.1, 0.1, 0.11, 10, 1, false, 0, Math.PI), bootMat, [0, -0.1, 0.21], [0, -Math.PI / 2, 0]);
+    addPart(boot, `boot_${side}_heel`, new THREE.BoxGeometry(0.15, 0.06, 0.09), leatherDark, [0, -0.17, -0.07]);
+    addPart(boot, `boot_${side}_sole`, new THREE.BoxGeometry(0.21, 0.025, 0.42), leatherDark, [0, -0.155, 0.085]);
+    addPart(boot, `boot_${side}_cuff`, new THREE.CylinderGeometry(0.13, 0.12, 0.06, 10), leatherDark, [0, 0.15, 0]);
+    addPart(boot, `boot_${side}_spur`, new THREE.CylinderGeometry(0.035, 0.035, 0.012, 8), steelMat, [0, -0.11, -0.14], [0, 0, Math.PI / 2]);
+  }
 
-  // Cyber Poncho (tapered flared silhouette)
-  addPart(g, 'poncho_mesh', new THREE.CylinderGeometry(0.32, 0.52, 0.72, 8), ponchoMat, [0, 1.12, 0]);
+  // Legs with leather knee pads
+  for (const [side, sx] of [['l', -0.18], ['r', 0.18]] as const) {
+    const leg = addPart(g, `leg_${side}`, new THREE.CylinderGeometry(0.12, 0.105, 0.5, 10), pantsMat, [sx, 0.56, 0]);
+    addPart(leg, `leg_${side}_knee`, new THREE.BoxGeometry(0.15, 0.13, 0.05), leatherDark, [0, -0.04, 0.105]);
+  }
 
-  // Shoulder Mantle
-  addPart(g, 'trim_mesh_shoulders', new THREE.BoxGeometry(0.92, 0.16, 0.44), trimMat, [0, 1.38, 0]);
+  // Cyber Poncho (tapered flared silhouette), fringe along the hem, a collar
+  const poncho = addPart(g, 'poncho_mesh', new THREE.CylinderGeometry(0.32, 0.52, 0.72, 8), ponchoMat, [0, 1.12, 0]);
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    // the hem is an octagon: pull each tassel in to its edge
+    const k = Math.cos(Math.PI / 8) / Math.cos(((a % (Math.PI / 4)) - Math.PI / 8));
+    const r = 0.5 * k;
+    addPart(poncho, `poncho_fringe_${i}`, new THREE.BoxGeometry(0.022, 0.1 + (i % 3) * 0.02, 0.012), ponchoMat, [Math.sin(a) * r, -0.4, Math.cos(a) * r], [0, a, 0]);
+  }
+  // collar ring: low and tight, behind the chin (the mask's chin sits at y 1.44–1.49, z ≥ 0.165)
+  addPart(g, 'trim_mesh_collar', new THREE.TorusGeometry(0.115, 0.03, 6, 14), trimMat, [0, 1.42, -0.01], [Math.PI / 2, 0, 0]);
+  addPart(g, 'head_neck', new THREE.CylinderGeometry(0.085, 0.1, 0.24, 10), skinMat, [0, 1.5, 0]);
 
-  // Cyber Belt & Buckle
-  addPart(g, 'belt_mesh', new THREE.CylinderGeometry(0.38, 0.4, 0.12, 8), bootMat, [0, 0.82, 0]);
+  // Shoulder mantle: a yoke behind the neck and a pad on each shoulder. The front stays open so
+  // nothing sits over the chin / jaw (the mask's jaw seam, the jaw dropping in the Ódio ending).
+  const yoke = addPart(g, 'trim_mesh_shoulders', new THREE.BoxGeometry(0.52, 0.12, 0.2), trimMat, [0, 1.38, -0.12]);
+  for (const sx of [-1, 1]) {
+    addPart(yoke, `trim_mesh_shoulders_pad_${sx < 0 ? 'l' : 'r'}`, new THREE.BoxGeometry(0.27, 0.15, 0.42), trimMat, [sx * 0.33, -0.01, 0.12], [0, 0, -sx * 0.18]);
+  }
+
+  // Cyber Belt & Buckle, a holster on the right hip, a row of cartridges
+  const belt = addPart(g, 'belt_mesh', new THREE.CylinderGeometry(0.38, 0.4, 0.12, 8), bootMat, [0, 0.82, 0]);
   addPart(g, 'trim_mesh_buckle', new THREE.BoxGeometry(0.18, 0.14, 0.12), trimMat, [0, 0.82, 0.38]);
+  const holster = addPart(belt, 'belt_holster', new THREE.BoxGeometry(0.1, 0.24, 0.16), leatherDark, [0.43, -0.12, 0.02], [0, 0, 0.12]);
+  addPart(holster, 'belt_holster_grip', new THREE.BoxGeometry(0.06, 0.1, 0.06), mat(0x3a2418, 0.6, 0.1), [0, 0.15, -0.03], [-0.3, 0, 0]);
+  for (let i = 0; i < 7; i++) {
+    const a = -0.9 + i * 0.3;
+    if (Math.abs(a) < 0.3) continue; // leave the buckle clear
+    addPart(belt, `belt_round_${i}`, new THREE.CylinderGeometry(0.014, 0.014, 0.07, 6), brass, [Math.sin(a) * 0.41, 0, Math.cos(a) * 0.41]);
+  }
 
-  // Arms
-  addPart(g, 'arm_l', new THREE.CylinderGeometry(0.1, 0.09, 0.56, 8), pantsMat, [-0.48, 1.1, 0.08], [0.4, 0, 0.18]);
-  addPart(g, 'arm_r', new THREE.CylinderGeometry(0.1, 0.09, 0.56, 8), pantsMat, [0.48, 1.1, 0.08], [0.4, 0, -0.18]);
+  // Arms: sleeve, a cuff, gloved hands with a thumb (named `boot…` so skins tint them leather)
+  // Hands hang a little out from the poncho rather than tucked against it (a +Z roll swings the
+  // lower end toward +X, so each arm rolls toward its own side)
+  for (const [side, sx, rz] of [['l', -0.52, -0.14], ['r', 0.52, 0.14]] as const) {
+    const arm = addPart(g, `arm_${side}`, new THREE.CylinderGeometry(0.1, 0.085, 0.56, 10), pantsMat, [sx, 1.1, 0.08], [0.4, 0, rz]);
+    addPart(arm, `arm_${side}_cuff`, new THREE.CylinderGeometry(0.1, 0.1, 0.06, 10), leatherDark, [0, -0.24, 0]);
+    const glove = addPart(arm, `boot_glove_${side}`, new THREE.BoxGeometry(0.12, 0.13, 0.1), bootMat, [0, -0.33, 0.01]);
+    addPart(glove, `boot_glove_${side}_thumb`, new THREE.BoxGeometry(0.035, 0.07, 0.04), bootMat, [-Math.sign(sx) * 0.06, 0.01, 0.04], [0, 0, Math.sign(sx) * 0.4]);
+  }
 
   // Head & Cyber Visor
-  addPart(g, 'head_mesh', new THREE.BoxGeometry(0.34, 0.34, 0.34), skinMat, [0, 1.62, 0]);
-  addPart(g, 'visor_mesh', new THREE.BoxGeometry(0.36, 0.12, 0.2), visorMat, [0, 1.65, 0.12]);
+  addPart(g, 'head_mesh', new THREE.BoxGeometry(0.34, 0.34, 0.34), skinMat, [0, 1.62 + HEAD_LIFT, 0]);
+  addPart(g, 'visor_mesh', new THREE.BoxGeometry(0.36, 0.12, 0.2), visorMat, [0, 1.65 + HEAD_LIFT, 0.12]);
 
-  // Stetson Hat (brim + crown + glowing band)
-  addPart(g, 'hat_mesh_brim', new THREE.CylinderGeometry(0.56, 0.58, 0.06, 12), hatMat, [0, 1.8, 0]);
-  addPart(g, 'hat_mesh_crown', new THREE.CylinderGeometry(0.24, 0.3, 0.26, 10), hatMat, [0, 1.94, 0]);
-  addPart(g, 'hatband_mesh', new THREE.CylinderGeometry(0.305, 0.305, 0.06, 10), visorMat, [0, 1.84, 0]);
+  // Human face mask — worn from the very first frame. Everything lives under `face_mask` so the
+  // Ódio ending can pull it off in one go. Names start with `mask_` on purpose: heroOutfits'
+  // partKey doesn't recognise that prefix, so no skin ever recolours the face.
+  const mask = new THREE.Group();
+  mask.name = 'face_mask';
+  mask.position.y = HEAD_LIFT; // parts below are laid out for the original head height
+  g.add(mask);
+  const maskSkin = mat(0xe8b48f, 0.32, 0.05); // a bit too smooth / waxy — "perfect" skin
+  const maskShade = mat(0xc98f6c, 0.45, 0.05);
+  const maskLip = mat(0xb8665a, 0.38, 0.05);
+  const maskBrow = mat(0x3a2418, 0.9, 0.0);
+  const maskSeam = mat(0x7a4a36, 0.6, 0.05); // the tell: a thin seam along the jaw
+  addPart(mask, 'mask_plate', new THREE.BoxGeometry(0.35, 0.33, 0.03), maskSkin, [0, 1.615, 0.18]);
+  addPart(mask, 'mask_cheek_l', new THREE.BoxGeometry(0.03, 0.2, 0.22), maskSkin, [-0.178, 1.6, 0.07]);
+  addPart(mask, 'mask_cheek_r', new THREE.BoxGeometry(0.03, 0.2, 0.22), maskSkin, [0.178, 1.6, 0.07]);
+  addPart(mask, 'mask_ear_l', new THREE.BoxGeometry(0.03, 0.09, 0.06), maskShade, [-0.2, 1.63, 0.0]);
+  addPart(mask, 'mask_ear_r', new THREE.BoxGeometry(0.03, 0.09, 0.06), maskShade, [0.2, 1.63, 0.0]);
+  addPart(mask, 'mask_brow_l', new THREE.BoxGeometry(0.11, 0.025, 0.02), maskBrow, [-0.085, 1.725, 0.205], [0, 0, -0.08]);
+  addPart(mask, 'mask_brow_r', new THREE.BoxGeometry(0.11, 0.025, 0.02), maskBrow, [0.085, 1.725, 0.205], [0, 0, 0.08]);
+  addPart(mask, 'mask_nose', new THREE.BoxGeometry(0.06, 0.1, 0.06), maskShade, [0, 1.575, 0.215]);
+  addPart(mask, 'mask_mouth', new THREE.BoxGeometry(0.12, 0.022, 0.02), maskLip, [0, 1.515, 0.2]);
+  addPart(mask, 'mask_chin', new THREE.BoxGeometry(0.16, 0.05, 0.04), maskSkin, [0, 1.465, 0.185]);
+  addPart(mask, 'mask_seam', new THREE.BoxGeometry(0.37, 0.012, 0.25), maskSeam, [0, 1.452, 0.075]);
+
+  // Stetson Hat: brim with the sides rolled up, a pinched crown with the crease on top, glowing band
+  const brim = addPart(g, 'hat_mesh_brim', new THREE.CylinderGeometry(0.5, 0.52, 0.05, 20), hatMat, [0, 1.8 + HEAD_LIFT, 0]);
+  for (const sx of [-1, 1]) {
+    addPart(brim, `hat_mesh_brim_roll_${sx < 0 ? 'l' : 'r'}`, new THREE.BoxGeometry(0.12, 0.04, 0.62), hatMat, [sx * 0.52, 0.04, 0], [0, 0, sx * 0.55]);
+  }
+  const crown = addPart(g, 'hat_mesh_crown', new THREE.CylinderGeometry(0.22, 0.29, 0.28, 14), hatMat, [0, 1.95 + HEAD_LIFT, 0]);
+  addPart(crown, 'hat_mesh_crease', new THREE.BoxGeometry(0.06, 0.05, 0.36), mat(0x2a1810, 0.9, 0.05), [0, 0.13, 0]);
+  for (const sx of [-1, 1]) {
+    addPart(crown, `hat_mesh_pinch_${sx < 0 ? 'l' : 'r'}`, new THREE.BoxGeometry(0.03, 0.14, 0.08), mat(0x2a1810, 0.9, 0.05), [sx * 0.1, 0.05, 0.215], [0.2, sx * 0.35, 0]);
+  }
+  addPart(g, 'hatband_mesh', new THREE.CylinderGeometry(0.296, 0.296, 0.06, 14), visorMat, [0, 1.85 + HEAD_LIFT, 0]);
 
   return g;
 }
