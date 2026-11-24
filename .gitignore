@@ -11,3 +11,6 @@ coverage/
 .data/
 # AI Studio agent scratch captures
 .aistudio/
+
+# Story / endings design notes (kept local, not published)
+docs/neon94-final-odio.md
