@@ -123,7 +123,8 @@ export type EnemyArchetype =
   | 'mantis'
   | 'juggernaut'
   | 'tesla'
-  | 'boss';
+  | 'boss'
+  | 'programmer';
 
 export type SkinId = 'sunset' | 'cyan_marshal' | 'acid_rattler' | 'gold_desperado' | 'phantom_mesa';
 
@@ -259,6 +260,11 @@ export interface HudSnapshot {
   damageFlashActive: boolean;
   boss: BossHudInfo | null;
   barricade: BarricadeHudInfo | null;
+  /** O Programador's floating terminal: what he's typing (null = nothing). */
+  programmerPrompt: { text: string; typing: boolean } | null;
+  /** His HUD hacks: integrity cells to light (null = "???"), ammo text to show (null = the real one). */
+  hpShown: number | null;
+  ammoShown: string | null;
 }
 
 export interface RunSummary {

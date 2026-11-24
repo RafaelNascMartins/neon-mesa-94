@@ -54,12 +54,18 @@ import { isSoulAwakened, SOUL_MAP, type SoulId } from './souls';
 import { HateEndingCutscene, type HateEndingSound } from './hateEnding';
 import { buildHateStage, type HateStage } from './hateStage';
 import { PcRoomScene } from './pcRoom';
+import { HateTreeScene } from './hateTree';
+import { ProgrammerFight, type ProgrammerSound } from './programmerFight';
+import { hudDisplay } from './programmerBoss';
 import { DeathFx } from './deathFx';
+import { PerfPanel } from './perfPanel';
 
 /** The Ódio ending's set is built here, far past the level (and its fog). */
 const HATE_STAGE_ORIGIN = new THREE.Vector3(0, 0, 700);
 /** …and the room outside the PC, somewhere else entirely. */
 const PC_ROOM_ORIGIN = new THREE.Vector3(0, 0, -700);
+/** The Hate ending's Tree, seen from the wasteland outside. */
+const HATE_TREE_ORIGIN = new THREE.Vector3(1400, 0, 0);
 import { aeroGrassTexture, aeroSkyTexture, buildAeroPillar, buildAeroWorld, buildBlobEnemy, buildEmoteSprite, RewriteCutscene, wobbleBlob, type AeroWorld } from './aeroWorld';
 
 interface RunStats {
@@ -71,7 +77,7 @@ import { itemVoxelGeometry } from './itemSprites';
 import { buildHazardField, buildWall, hazardAt, makeRoomLayout, pushOutOfHazards, ROOM_LAYOUTS, type HazardDef, type HazardField } from './roomHazards';
 import { animateFlyer, buildFlyerModel } from './enemyFlyer';
 import { applyHeroOutfit, outfitAura } from './heroOutfits';
-import { batchStaticLeaves, snapshotLeaves, type BatchSnapshot } from './staticBatch';
+import { planStaticBatches, runBatchJob, snapshotLeaves, type BatchJob, type BatchSnapshot } from './staticBatch';
 import { buildCacheProp, buildCrateProp, buildMesaProp, buildRuinProp } from './obstacleModels';
 import {
   createCemeteryGroundFloor,
@@ -116,6 +122,11 @@ import {
   isBossReturnWave,
   isBossWave,
   BOSS_RETURN_WAVE,
+  PROGRAMMER_WAVE,
+  AERO_FIRST_WAVE,
+  AERO_SERVANT_WAVE,
+  AERO_DEMIURGE_WAVE,
+  aeroRoomNumber,
   MAX_ENEMIES_ON_FIELD,
   isManualWeapon,
   resolveCircleObstacleCollision,
@@ -468,6 +479,7 @@ export class NeonMesaEngine {
     | 'aero_intro'
     | 'hate_ending'
     | 'pc_ending'
+    | 'hate_tree'
     | 'death' =
     'none';
   private cutsceneTimer = 0;
@@ -494,6 +506,12 @@ export class NeonMesaEngine {
   private trauma = 0;
   private damageFlash = 0;
   private hudSyncTimer = 0;
+  /** Last HUD snapshot sent (serialized): identical snapshots aren't re-sent to React. */
+  private lastHudKey = '';
+  /** Cem Faces' key light: always in the scene (adding a light mid-fight recompiles every shader). */
+  private bossGlow!: THREE.PointLight;
+  /** `?perf` on the URL: FPS / frame time / draw calls overlay. */
+  private perf: PerfPanel | null = null;
   private currentRimColorHex = 0xff5a22;
   private groundMat!: THREE.MeshStandardMaterial;
   private floors!: Record<'road' | 'desert' | 'cemetery' | 'clearing' | 'tree', FloorSet>;
@@ -520,7 +538,9 @@ export class NeonMesaEngine {
   private treeWireframeDecorGroup = new THREE.Group();
   private giantTreeAnchor = new THREE.Group();
   /** Static batching of the visible decor (see staticBatch.ts): snapshot, then merge what stayed still. */
-  private batchPass: { t: number; snaps: { root: THREE.Object3D; snap: BatchSnapshot }[] | null } | null = null;
+  private batchPass: { t: number; snaps: { root: THREE.Object3D; snap: BatchSnapshot }[] | null; jobs?: BatchJob[]; saved?: number } | null = null;
+  /** Geometries owned by the loaded .glb templates (shared by clones: never disposed with an obstacle). */
+  private assetGeometries = new Set<THREE.BufferGeometry>();
   private eastRoadPortalRing!: THREE.Mesh;
   private northPortalRing!: THREE.Mesh;
   private treeLeftPortalRing!: THREE.Mesh;
@@ -616,6 +636,17 @@ export class NeonMesaEngine {
   private shakeScale = 1;
   private grainLevel = DEFAULT_GRAIN;
   private pcRoom: PcRoomScene | null = null;
+  private hateTree: HateTreeScene | null = null;
+  /** O Programador (final boss): his fight, and the timer to whatever ending comes after it. */
+  private programmer: ProgrammerFight | null = null;
+  private programmerEndT = 0;
+  /** What comes after him, run at the top of the next enemy update (not mid-loop). */
+  private programmerOutcome: 'hate' | 'win' | null = null;
+  /** The aero world's corruption: where it is now, easing toward what this room calls for. */
+  private aeroCorruption = 0;
+  /** Guns fired this run (the amalgam is built from them). */
+  private usedWeapons = new Set<WeaponId>();
+  private hateWindStop: ((fadeSec?: number) => void) | null = null;
   /** The player's death: white figure on black, cracking like glass; then the death screen. */
   private deathFx: DeathFx | null = null;
   private deathMusic: EndingClip | null = null;
@@ -781,7 +812,7 @@ export class NeonMesaEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.32;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
@@ -846,6 +877,12 @@ export class NeonMesaEngine {
     this.scene.add(this.aimReticleMesh);
 
     this.muzzleLight = new THREE.PointLight(0xffaa33, 0, 9);
+    this.bossGlow = new THREE.PointLight(0xff445e, 0, 16);
+    this.scene.add(this.bossGlow);
+    if (new URLSearchParams(window.location.search).has('perf')) {
+      this.perf = new PerfPanel(container);
+      this.renderer.info.autoReset = false; // counts both passes (scene + pixel filter) per frame
+    }
     this.muzzleLight.position.set(0, 1.4, 0);
     this.scene.add(this.muzzleLight);
 
@@ -1673,10 +1710,19 @@ export class NeonMesaEngine {
       // Only what's on screen now: hidden subtrees aren't animated, so stillness proves nothing
       pass.snaps = roots.map((root) => ({ root, snap: snapshotLeaves(root, true) }));
     } else if (pass.snaps && pass.t >= 2.2) {
-      let saved = 0;
-      for (const { root, snap } of pass.snaps) saved += batchStaticLeaves(root, snap);
-      this.batchPass = null;
-      if (saved > 0) console.info('[perf] static batching merged away ' + saved + ' draw calls');
+      // Merge a few groups per frame (all at once was a long freeze ~2s into every new area)
+      if (!pass.jobs) {
+        pass.jobs = pass.snaps.flatMap(({ root, snap }) => planStaticBatches(root, snap));
+        pass.saved = 0;
+      }
+      const start = performance.now();
+      while (pass.jobs.length > 0 && performance.now() - start < 2.5) {
+        pass.saved! += runBatchJob(pass.jobs.shift()!);
+      }
+      if (pass.jobs.length === 0) {
+        this.batchPass = null;
+        if (pass.saved! > 0) console.info('[perf] static batching merged away ' + pass.saved + ' draw calls');
+      }
     }
   }
 
@@ -1995,9 +2041,21 @@ export class NeonMesaEngine {
       this.heroRoot.add(this.playerMarker);
 
       this.scene.add(this.heroRoot);
+      for (const a of Object.values(this.assets)) {
+        (a as THREE.Object3D).traverse?.((o) => {
+          const m = o as THREE.Mesh;
+          if (m.isMesh) this.assetGeometries.add(m.geometry);
+        });
+      }
       this.buildArenaObstacles();
 
       if (!this.isSoftwareGl) {
+        try {
+          await this.prewarmZones();
+        } catch (err) {
+          console.warn('[perf] prewarm failed', err);
+        }
+        if (this.disposed) return;
         this.renderer.compile(this.scene, this.camera);
       }
 
@@ -2010,11 +2068,69 @@ export class NeonMesaEngine {
     }
   }
 
+  /**
+   * Frees an old obstacle's GPU vertex buffers (template geometry is kept). Materials aren't
+   * disposed: that would release their shader programs and the next visit would recompile them.
+   */
+  private disposeObstacle(group: THREE.Object3D) {
+    group.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      if (!this.assetGeometries.has(m.geometry)) m.geometry.dispose();
+    });
+  }
+
+  /**
+   * Loading screen: compiles every area's shaders and uploads every area's textures to the GPU
+   * now, so walking into a new area for the first time doesn't freeze the game doing it.
+   */
+  private async prewarmZones() {
+    const groups = [this.roadDecorGroup, this.desertDecorGroup, this.cemeteryDecorGroup, this.clearingDecorGroup, this.treeDecorGroup];
+    const saved = groups.map((g) => ({ g, visible: g.visible, parent: g.parent }));
+    for (const g of groups) {
+      g.visible = true;
+      if (g.parent !== this.scene) this.scene.add(g);
+    }
+    // the Tree's two looks (industrial / wireframe) take turns being hidden
+    const subs = [this.treeMegaDecorGroup, this.treeWireframeDecorGroup].map((g) => ({ g, visible: g.visible }));
+    for (const { g } of subs) g.visible = true;
+    const textures = new Set<THREE.Texture>();
+    const collect = (mat: THREE.Material) => {
+      for (const v of Object.values(mat)) if (v && (v as THREE.Texture).isTexture) textures.add(v as THREE.Texture);
+    };
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.material) return;
+      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) collect(mat);
+    });
+    for (const f of Object.values(this.floors)) textures.add(f.map).add(f.bump).add(f.glow);
+    for (const t of textures) this.renderer.initTexture(t);
+    // Each area in turn: its obstacles and its floor maps (the floor material changes shape with them)
+    const zoneNow = this.zone;
+    for (const z of Object.keys(this.floors) as (keyof typeof this.floors)[]) {
+      this.zone = z;
+      this.buildArenaObstacles();
+      this.setFloor(this.floors[z]);
+      await this.renderer.compileAsync(this.scene, this.camera);
+      if (this.disposed) return;
+    }
+    this.zone = zoneNow;
+    this.setFloor(null);
+    await this.renderer.compileAsync(this.scene, this.camera);
+    for (const { g, visible } of subs) g.visible = visible;
+    for (const { g, visible, parent } of saved) {
+      g.visible = visible;
+      if (parent !== this.scene) this.scene.remove(g);
+    }
+    this.applyZoneVisuals(this.zone);
+  }
+
   private buildArenaObstacles() {
     if (!this.assets) return;
 
     for (const obs of this.obstacles) {
       this.scene.remove(obs.group);
+      this.disposeObstacle(obs.group);
     }
     this.obstacles = [];
 
@@ -2102,6 +2218,7 @@ export class NeonMesaEngine {
   private tick() {
     if (this.disposed) return;
     const now = performance.now();
+    if (this.perf) this.renderer.info.reset();
     const rawDt = (now - this.lastTimeMs) / 1000;
     this.lastTimeMs = now;
     const realDt = Math.min(Math.max(rawDt, 0.001), 0.05);
@@ -2187,6 +2304,7 @@ export class NeonMesaEngine {
       this.blastFx.update(dt);
       this.updateBolts(dt);
       if (this.aero && this.aeroWorld?.group.visible) {
+        this.updateAeroCorruption(realDt);
         this.aeroWorld.update(this.elapsedSec, dt);
         for (const e of this.enemies) if (e.mesh.userData.blob) wobbleBlob(e.mesh, this.elapsedSec, e.walkPhase);
       }
@@ -2233,7 +2351,14 @@ export class NeonMesaEngine {
       hell,
       !cinematic && this.boss2Stage !== 'lull'
     );
-    let f = this.cutsceneMode === 'hate_ending' || this.cutsceneMode === 'pc_ending' ? 0.05 : cinematic ? 1 : lightFactor;
+    let f =
+      this.cutsceneMode === 'hate_ending' || this.cutsceneMode === 'pc_ending'
+        ? 0.05
+        : this.cutsceneMode === 'hate_tree'
+          ? 0.62
+          : cinematic
+            ? 1
+            : lightFactor;
     if (lull > 0) {
       // The calm before he comes: the rig is dead, the main lights sag and stutter harder and harder
       const chatter = Math.sin(this.elapsedSec * 61) * Math.sin(this.elapsedSec * 17.3);
@@ -2250,6 +2375,8 @@ export class NeonMesaEngine {
       const flick = 0.88 + Math.sin(this.elapsedSec * (9 + i * 3.1)) * 0.06 + Math.sin(this.elapsedSec * (23 + i * 5.7)) * 0.06;
       l.intensity = this.inVmSpace ? 0 : base * flick * (0.35 + 0.65 * f);
     }
+
+    this.updateBossGlow();
 
     // Render scene through Bayer 4x4 dithering retro shader + subtle atmospheric rim tint
     this.ditherPass.render(
@@ -2269,7 +2396,44 @@ export class NeonMesaEngine {
       }
     }
 
+    if (this.perf) {
+      const info = this.renderer.info;
+      this.perf.frame(now, performance.now() - now, {
+        calls: info.render.calls,
+        triangles: info.render.triangles,
+        programs: info.programs?.length ?? 0,
+        geometries: info.memory.geometries,
+        textures: info.memory.textures,
+        enemies: this.enemies.length,
+        lights: this.lightCount(),
+      });
+    }
+
     this.scheduleNextFrame();
+  }
+
+  /** Puts the shared boss light on whichever Cem Faces is on screen (or switches it off). */
+  private updateBossGlow() {
+    let anchor: THREE.Object3D | undefined;
+    for (const e of this.enemies) {
+      if (e.archetype !== 'boss' || !e.mesh.visible) continue;
+      anchor = e.mesh.getObjectByName('boss_key_glow');
+      if (anchor) break;
+    }
+    if (anchor) {
+      anchor.getWorldPosition(this.bossGlow.position);
+      this.bossGlow.intensity = 6.5;
+    } else {
+      this.bossGlow.intensity = 0;
+    }
+  }
+
+  private lightCount() {
+    let n = 0;
+    this.scene.traverseVisible((o) => {
+      if ((o as THREE.Light).isLight) n++;
+    });
+    return n;
   }
 
   private updateStormAndLightning(dt: number) {
@@ -2629,6 +2793,11 @@ export class NeonMesaEngine {
     if (this.cutsceneMode === 'pc_ending') {
       this.mouseJustPressed = false;
       this.pcRoom?.update(dt);
+      return;
+    }
+    if (this.cutsceneMode === 'hate_tree') {
+      this.mouseJustPressed = false;
+      this.hateTree?.update(dt);
       return;
     }
     if (this.cutsceneMode === 'death') {
@@ -3076,6 +3245,7 @@ export class NeonMesaEngine {
     }
 
     this.fireCooldown = weapon.fireInterval;
+    this.usedWeapons.add(this.activeWeapon);
 
     // Melee weapons swing instead of firing; "ammo" is durability
     if (weapon.melee) {
@@ -3256,7 +3426,9 @@ export class NeonMesaEngine {
         this.pickupBannerTimer = 1.8;
       }
     }
-    this.emitHud();
+    if (weapon.fireInterval >= 0.15 || fallback.activeWeapon !== this.activeWeapon || this.weaponHeatState.overheated !== prevOverheated) {
+      this.emitHud();
+    }
   }
 
   /**
@@ -4080,6 +4252,13 @@ export class NeonMesaEngine {
     this.waveTokenCap = plan.attackTokenCap;
     this.waveSpawnTimer = 0.45;
     this.setupRoomLayout(waveNum);
+    const programmerFloor = this.aero && waveNum === PROGRAMMER_WAVE;
+    if (programmerFloor) {
+      this.waveQueue = [];
+      this.hexerPending = false;
+      this.flyersPending = 0;
+      this.spawnProgrammer();
+    }
 
     // Cemetery Round 3 (Wave 7): Heavy thunderstorm
     if (this.zone === 'cemetery' && waveNum === 7) {
@@ -4100,14 +4279,23 @@ export class NeonMesaEngine {
     }
 
     const roundInfo = getSectorRoundInfo(waveNum);
-    if (isBossWave(waveNum) && !isBossReturnWave(waveNum)) {
+    if (programmerFloor) {
+      this.waveBanner = 'CHEFE FINAL · O PROGRAMADOR';
+      this.waveBannerTimer = 3.4;
+      synthAudio.playBossAlert();
+    } else if (isBossWave(waveNum) && !isBossReturnWave(waveNum)) {
       this.waveBanner = `CHEFE · ${ENEMY_CONFIGS.boss.label}`;
       this.waveBannerTimer = 3.2;
       synthAudio.playBossAlert();
       this.spawnPickup(waveNum % 10 === 5 ? 'railgun' : 'rocket', 4.5, 6.5, 32);
       this.spawnArenaWeaponPickup();
+    } else if (this.zone === 'tree' && this.aero && (waveNum === AERO_SERVANT_WAVE || waveNum === AERO_DEMIURGE_WAVE)) {
+      // (both bosses still to be built: a normal room stands in for each)
+      this.waveBanner = waveNum === AERO_SERVANT_WAVE ? 'CHEFE · O SERVO-MÁQUINA' : 'CHEFE · O DEMIURGO';
+      this.waveBannerTimer = 3.2;
+      synthAudio.playBossAlert();
     } else if (this.zone === 'tree' && this.aero) {
-      this.waveBanner = `CAMPO AERO · SALA ${Math.max(1, waveNum - BOSS_RETURN_WAVE)}`;
+      this.waveBanner = `CAMPO AERO · SALA ${aeroRoomNumber(waveNum) ?? 1}/10`;
       this.waveBannerTimer = 2.6;
     } else if (this.zone === 'tree') {
       this.waveBanner = `PROFUNDIDADE ${this.treeDepth} · ${ROOM_LAYOUTS[waveNum]?.name ?? 'INFERNO INDUSTRIAL'}`;
@@ -4199,7 +4387,7 @@ export class NeonMesaEngine {
         ? buildBlobEnemy(archetype, opts.flying)
         : opts.flying
           ? buildFlyerModel()
-          : cloneModelWithUniqueMaterials(this.assets.enemies[archetype]);
+          : cloneModelWithUniqueMaterials(this.assets.enemies[archetype as Exclude<EnemyArchetype, 'programmer'>]);
     mesh.position.set(x, emergeDuration > 0 && !teleport ? -1.9 : 0, z);
     if (teleport) {
       mesh.scale.set(0.05, 1.8, 0.05);
@@ -4274,7 +4462,9 @@ export class NeonMesaEngine {
       leapRingMesh.visible = false;
       this.scene.add(leapRingMesh);
 
-      const bossKeyGlow = new THREE.PointLight(0xff445e, 6.5, 16);
+      // where his key light sits (the light itself is the shared, always-present bossGlow)
+      const bossKeyGlow = new THREE.Object3D();
+      bossKeyGlow.name = 'boss_key_glow';
       bossKeyGlow.position.set(0, 5.2, 3.2);
       mesh.add(bossKeyGlow);
     }
@@ -4361,6 +4551,13 @@ export class NeonMesaEngine {
   }
 
   private updateEnemies(dt: number) {
+    if (this.programmerOutcome) {
+      const outcome = this.programmerOutcome;
+      this.programmerOutcome = null;
+      if (outcome === 'hate') this.playHateEnding();
+      else this.finishProgrammerWin();
+      return;
+    }
     let activeTokens = 0;
     for (const e of this.enemies) {
       if (e.hasToken && e.state !== 'ko') activeTokens++;
@@ -4375,6 +4572,11 @@ export class NeonMesaEngine {
         if (e.hitFlashTimer === 0) {
           this.setGroupEmissiveFlash(e.mesh, false);
         }
+      }
+
+      if (e.archetype === 'programmer') {
+        this.updateProgrammerEntity(e, dt);
+        continue;
       }
 
       if (e.state === 'ko') {
@@ -5956,6 +6158,10 @@ export class NeonMesaEngine {
     }
     // Soul of Hatred: the more you're hurt, the harder you hit
     if (this.soul === 'odio') amount *= 1 + 0.08 * Math.max(0, this.playerMaxHp - this.playerHp);
+    if (e.archetype === 'programmer') {
+      this.damageProgrammer(e, amount);
+      return;
+    }
     e.hp -= amount;
     // Charm rounds: sometimes the fight just leaves them
     if (e.hp > 0 && this.upgrades.has('charm') && e.archetype !== 'boss' && !e.hexer && Math.random() < 0.08) this.pacifyEnemy(e, 4);
@@ -6591,11 +6797,13 @@ export class NeonMesaEngine {
 
   public startNewRun(startWave = 1, soul: SoulId | null = this.soul) {
     this.soul = soul;
+    this.usedWeapons.clear();
     this.soulAwakened = false;
     // Restarting mid-intro: settle it first so its car ends up parked
     if (this.intro) this.finishIntro();
     this.teardownHateEnding();
     this.teardownDeath();
+    this.teardownProgrammer();
     this.resetAero();
     // Dev jump straight past Cem Faces' second fight lands in the aero world
     if (startWave > BOSS_RETURN_WAVE) {
@@ -6827,6 +7035,9 @@ export class NeonMesaEngine {
     } else if (this.cutsceneMode === 'pc_ending') {
       if (this.pcRoom && this.pcRoom.time < 1) return;
       this.pcRoom?.finish();
+    } else if (this.cutsceneMode === 'hate_tree') {
+      if (this.hateTree && this.hateTree.time < 1) return;
+      this.hateTree?.finish();
     } else if (this.cutsceneMode === 'death') {
       return; // dying can't be skipped
     } else {
@@ -6858,6 +7069,7 @@ export class NeonMesaEngine {
       this.cutsceneMode === 'aero_intro' ||
       this.cutsceneMode === 'hate_ending' ||
       this.cutsceneMode === 'pc_ending' ||
+      this.cutsceneMode === 'hate_tree' ||
       this.cutsceneMode === 'death'
     );
   }
@@ -6893,6 +7105,7 @@ export class NeonMesaEngine {
   public playHateEnding() {
     if (!this.assets || !this.heroModel || this.hateEnding) return;
     if (this.phase !== 'playing' && this.phase !== 'paused') return;
+    this.teardownProgrammer();
     if (this.intro) this.finishIntro();
     if (this.phase === 'paused') this.setPaused(false);
 
@@ -6957,6 +7170,297 @@ export class NeonMesaEngine {
     this.aimReticleMesh.visible = false;
     this.mouseDown = false;
     this.emitHud();
+  }
+
+  // ───────────────────────── O Programador ─────────────────────────
+
+  /** His floor: the room is cleared to bare floor and he walks in. */
+  private spawnProgrammer() {
+    if (!this.assets || this.programmer) return;
+    for (const o of this.obstacles) this.scene.remove(o.group);
+    this.obstacles = [];
+    synthAudio.stopAeroMusic(0.8);
+    synthAudio.startBossMusic();
+    const fight = new ProgrammerFight({
+      scene: this.scene,
+      hero: this.assets.hero,
+      weaponCopy: (id) => this.centredWeaponCopy(id),
+      usedWeapons: () => [...this.usedWeapons],
+      player: () => ({
+        x: this.playerX,
+        z: this.playerZ,
+        firing: this.mouseDown || this.touchFiring,
+        aimX: Math.sin(this.playerYaw),
+        aimZ: Math.cos(this.playerYaw),
+      }),
+      hurtPlayer: (dx, dz) => this.damagePlayer(1, dx, dz),
+      shoot: (x, z, dx, dz, speed, color) => {
+        this.spawnProjectile(false, 'enemy_bolt', x, 1.1, z, dx * speed, dz * speed, 1, 0, color);
+      },
+      particles: (x, y, z, n, color, speed, life) => this.spawnParticles(x, y, z, n, color, speed, life),
+      shake: (a) => {
+        this.trauma = Math.min(1, Math.max(this.trauma, a));
+      },
+      setFloorBroken: (half) => this.setProgrammerFloor(half),
+      sound: (id) => this.playProgrammerSound(id),
+    });
+    this.scene.add(fight.root);
+    this.programmer = fight;
+    this.programmerEndT = 0;
+    const cfg = ENEMY_CONFIGS.programmer;
+    const shadow = this.createContactShadow(2);
+    this.scene.add(shadow);
+    this.enemies.push({
+      id: this.nextEntityId++,
+      archetype: 'programmer',
+      mesh: fight.hitMesh,
+      shadow,
+      x: fight.x,
+      z: fight.z,
+      vx: 0,
+      vz: 0,
+      yaw: 0,
+      hp: cfg.hp,
+      maxHp: cfg.hp,
+      radius: fight.radius,
+      speed: cfg.speed,
+      state: 'move',
+      stateTimer: 0,
+      hitFlashTimer: 0,
+      koTimer: 0,
+      aimX: 0,
+      aimZ: 1,
+      strafeSign: 1,
+      walkPhase: 0,
+      hasToken: false,
+    });
+    this.markSeen('programmer');
+    this.teleportFx.spawn(fight.x, fight.z, 2, 0.9, 3.2);
+    synthAudio.playTeleportIn();
+  }
+
+  private updateProgrammerEntity(e: EnemyEntity, dt: number) {
+    const f = this.programmer;
+    if (!f) return;
+    f.update(dt);
+    e.x = f.x;
+    e.z = f.z;
+    e.radius = f.radius;
+    if (e.mesh !== f.hitMesh) {
+      this.setGroupEmissiveFlash(e.mesh, false);
+      e.mesh = f.hitMesh;
+    }
+    const onFloor = f.form === 'default' || f.form === 'knight';
+    e.shadow.visible = onFloor && f.dying === 0;
+    e.shadow.position.set(f.x, 0.02, f.z);
+    // the prompt types in real time: keep the HUD's copy fresh
+    if (f.brain.prompt?.typing) this.hudSyncTimer = Math.max(this.hudSyncTimer, 0.06);
+
+    // Hate: he gave up. A moment of him on his knees, then the ending
+    if (f.broken) {
+      this.programmerEndT += dt;
+      if (this.programmerEndT > 2.6) this.programmerOutcome = 'hate';
+      return;
+    }
+    // Any other soul: he's come apart; the PC outside comes back
+    if (f.dead) {
+      this.programmerEndT += dt;
+      if (this.programmerEndT === dt) this.captureFramePending = true;
+      if (this.programmerEndT > 0.5) this.programmerOutcome = 'win';
+    }
+  }
+
+  private damageProgrammer(e: EnemyEntity, amount: number) {
+    const f = this.programmer;
+    if (!f || f.dying > 0 || f.broken) return;
+    amount *= f.damageScale;
+    e.hitFlashTimer = 0.055;
+    this.setGroupEmissiveFlash(e.mesh, true, amount > 0 ? 0xffffff : 0x666666);
+    if (amount <= 0) {
+      // nothing gets through this body: sparks off it
+      this.spawnParticles(e.x, 1.6, e.z, 3, 0x888888, 6, 0.15);
+      return;
+    }
+    f.onHit(amount);
+    this.spawnParticles(e.x, 1.2, e.z, 4, Math.random() < 0.5 ? 0x000000 : 0xff1e3c, 6, 0.2);
+    synthAudio.playHit(false);
+    // Soul of Hate: he doesn't die. He breaks.
+    if (this.soul === 'odio' && e.hp - amount <= e.maxHp * 0.05) {
+      e.hp = Math.max(1, Math.round(e.maxHp * 0.05));
+      f.breakDown();
+      this.programmerEndT = 0;
+      synthAudio.endBossMusic(1.5);
+      this.emitHud();
+      return;
+    }
+    e.hp -= amount;
+    if (e.hp <= 0) {
+      e.hp = 0;
+      f.die();
+      this.programmerEndT = 0;
+      this.score += ENEMY_CONFIGS.programmer.scoreValue;
+      this.kills += 1;
+      this.trauma = 1;
+      synthAudio.endBossMusic(1.2);
+      synthAudio.playShortCircuit(2);
+      this.emitHud();
+    }
+  }
+
+  /** He's gone (not the Hate path): fade out, and the room outside the PC: it recovers. */
+  private finishProgrammerWin() {
+    this.teardownProgrammer();
+    this.cancelSlowMo();
+    synthAudio.pauseMusic(true);
+    this.heroShadow.visible = false;
+    this.aimReticleMesh.visible = false;
+    this.mouseDown = false;
+    this.cineFadeEl.style.background = '#000000';
+    this.cineFadeEl.style.opacity = '1';
+    this.startHatePc('restore');
+    this.emitHud();
+  }
+
+  private teardownProgrammer() {
+    this.programmerOutcome = null;
+    const i = this.enemies.findIndex((e) => e.archetype === 'programmer');
+    if (i >= 0) this.removeEnemyAt(i);
+    if (!this.programmer) return;
+    this.programmer.dispose();
+    this.programmer = null;
+    this.setProgrammerFloor(null);
+  }
+
+  /** The amalgam breaks the floor away except a strip across the middle (|z| < half). */
+  private setProgrammerFloor(half: number | null) {
+    if (this.hazardField) this.scene.remove(this.hazardField.group);
+    this.hazardField = null;
+    this.hazardDefs = [];
+    this.fallTimer = 0;
+    if (half === null) return;
+    const R = ARENA_RADIUS + 6;
+    const hd = (R - half) / 2;
+    const defs: HazardDef[] = [
+      { kind: 'pit', x: 0, z: -(half + hd), r: Math.hypot(R, hd), hw: R, hd, open: 'nwe' },
+      { kind: 'pit', x: 0, z: half + hd, r: Math.hypot(R, hd), hw: R, hd, open: 'swe' },
+    ];
+    this.hazardField = buildHazardField(defs);
+    this.scene.add(this.hazardField.group);
+    this.hazardDefs = defs;
+    // if you fall, you climb back onto the strip
+    this.safeX = Math.max(-ARENA_RADIUS + 2, Math.min(ARENA_RADIUS - 2, this.playerX));
+    this.safeZ = 0;
+    // and if you weren't on it, it isn't a free hit: you're on the edge
+    for (let k = 0; k < 24; k++) {
+      const x = (Math.random() * 2 - 1) * (ARENA_RADIUS - 2);
+      this.fx.puff(x, 0.4, (Math.random() < 0.5 ? -1 : 1) * (half + 0.5), 1.2, 0x2a2a2a, { x: 0, z: 0 });
+    }
+  }
+
+  private playProgrammerSound(id: ProgrammerSound) {
+    switch (id) {
+      case 'key':
+        synthAudio.playKeyClick();
+        break;
+      case 'execute':
+      case 'hack':
+        synthAudio.playCrtGlitch();
+        break;
+      case 'morph':
+        synthAudio.playShortCircuit(1.4);
+        break;
+      case 'revolver':
+        synthAudio.playShoot('pistol');
+        break;
+      case 'dash':
+        synthAudio.playDash();
+        break;
+      case 'telegraph':
+        synthAudio.playAlert();
+        break;
+      case 'slash':
+        synthAudio.playShoot('katana');
+        break;
+      case 'lunge':
+        synthAudio.playShoot('hammer');
+        break;
+      case 'slam':
+        synthAudio.playBossSlam();
+        break;
+      case 'burrow':
+        synthAudio.playTombstoneBreak();
+        break;
+      case 'vital':
+        synthAudio.playParry(2);
+        break;
+      case 'beam':
+        synthAudio.playRmRf();
+        break;
+      case 'volley':
+        synthAudio.playShoot('nailgun');
+        break;
+      case 'floor_break':
+        synthAudio.playCeilingCrash();
+        break;
+      case 'floor_fix':
+        synthAudio.playPortalOpen();
+        break;
+    }
+  }
+
+  /** A gun model re-centred on its own middle (the models are laid out for the hand holder). */
+  private centredWeaponCopy(id: WeaponId): THREE.Object3D | null {
+    const src = this.weaponModels[id] ?? this.weaponModels.pistol;
+    if (!src) return null;
+    const inner = src.clone(true);
+    inner.visible = true;
+    inner.position.set(0, 0, 0);
+    inner.rotation.set(0, 0, 0);
+    inner.scale.setScalar(1);
+    inner.updateMatrixWorld(true);
+    const centre = new THREE.Box3().setFromObject(inner).getCenter(new THREE.Vector3());
+    inner.position.copy(centre).negate();
+    const copy = new THREE.Group();
+    copy.add(inner);
+    return copy;
+  }
+
+  /** Dev: straight to his floor (aero world), with the given soul. */
+  public devProgrammer(soul: SoulId) {
+    this.startNewRun(PROGRAMMER_WAVE, soul);
+    this.devArm();
+  }
+
+  /**
+   * Dev: a room of the second (aero) world (1–10, 'servo' or 'demiurgo'); room 1 plays its
+   * arrival cutscene.
+   */
+  public devAero(soul: SoulId, room: string | null = null) {
+    const n = Number(room);
+    const wave =
+      room === 'servo'
+        ? AERO_SERVANT_WAVE
+        : room === 'demiurgo'
+          ? AERO_DEMIURGE_WAVE
+          : Number.isInteger(n) && n >= 1 && n <= 10
+            ? n <= 5
+              ? AERO_FIRST_WAVE + n - 1
+              : AERO_SERVANT_WAVE + n - 5
+            : AERO_FIRST_WAVE;
+    this.startNewRun(wave, soul);
+    this.devArm();
+    if (wave === AERO_FIRST_WAVE) this.beginAeroIntro();
+  }
+
+  /** A real gun for a dev jump (a run would have found one by now), and a few "used" for the amalgam. */
+  private devArm() {
+    const res = acquireOrSwapWeapon(this.ownedWeapons, this.activeWeapon, this.ammo, 'plasma', undefined, false);
+    if (res.pickedUp) {
+      this.ownedWeapons = res.ownedWeapons;
+      this.ammo = res.ammo;
+      this.switchWeapon(res.activeWeapon);
+    }
+    for (const w of ['pistol', 'shotgun', 'plasma', 'rocket', 'railgun'] as WeaponId[]) this.usedWeapons.add(w);
   }
 
   /** Stand-in for the final boss: the cowboy's silhouette, all black, no visor. */
@@ -7063,6 +7567,11 @@ export class NeonMesaEngine {
   private teardownHateEnding() {
     this.pcRoom?.dispose();
     this.pcRoom = null;
+    this.hateTree?.dispose();
+    this.hateTree = null;
+    this.hateWindStop?.(0.3);
+    this.hateWindStop = null;
+    if (this.cutsceneMode === 'hate_tree') this.cutsceneMode = 'none';
     this.ditherPass.setGrain(this.grainLevel);
     this.hateTalkStop?.(0.1);
     this.hateTalkStop = null;
@@ -7109,6 +7618,53 @@ export class NeonMesaEngine {
     this.setSubtitle(null);
     this.setLetterbox(0);
     this.trauma = 0; // the lunge's shake stays in there
+    this.startHateTree();
+  }
+
+  /** Outside: the Tree under a colourless sky, coming apart. Then the room outside the PC. */
+  private startHateTree() {
+    if (!this.assets) {
+      this.startHatePc();
+      return;
+    }
+    // No colour left: grey sky, grey haze, flat grey light
+    this.scene.background = new THREE.Color(HateTreeScene.SKY);
+    this.scene.fog = new THREE.FogExp2(HateTreeScene.SKY, 0.0085);
+    this.keyLight.color.setHex(0xdadada);
+    this.hemiLight.color.setHex(0xbdbdbd);
+    this.hemiLight.groundColor.setHex(0x2e2e2e);
+    this.rimLight.color.setHex(0x9a9a9a);
+    this.currentRimColorHex = 0x8c8c8c;
+    this.hateWindStop = synthAudio.playAshWind();
+    this.hateTree = new HateTreeScene({
+      camera: this.camera,
+      aim: (pos, target) => this.cineCamera(pos, target),
+      origin: HATE_TREE_ORIGIN,
+      parent: this.scene,
+      tree: cloneModelWithUniqueMaterials(this.assets.treeGiant),
+      fadeEl: this.cineFadeEl,
+      shake: (a) => {
+        this.trauma = Math.max(this.trauma, a);
+      },
+      play: (id, size) => {
+        if (id === 'crumble') synthAudio.playCrumble(size);
+        else if (id === 'groan') synthAudio.playGroan();
+      },
+      onFinished: () => {
+        this.hateWindStop?.(0.6);
+        this.hateWindStop = null;
+        this.hateTree?.dispose();
+        this.hateTree = null;
+        this.trauma = 0;
+        this.startHatePc();
+      },
+    });
+    this.cutsceneMode = 'hate_tree';
+  }
+
+  private startHatePc(variant: 'bsod' | 'restore' = 'bsod') {
+    this.scene.background = new THREE.Color(0x020203);
+    this.scene.fog = new THREE.FogExp2(0x020203, 0.012);
     this.ditherPass.setGrain(this.grainLevel * 0.6); // the real world: much less film grain
 
     this.pcRoom = new PcRoomScene({
@@ -7122,7 +7678,10 @@ export class NeonMesaEngine {
       play: (id) => {
         if (id === 'reboot') synthAudio.playEndingSample('pcReboot', 2.2);
         else if (id === 'bootup') synthAudio.playEndingSample('pcBootUp', 2.6);
+        else if (id === 'crash') synthAudio.playPcCrash();
       },
+      // Hate ending: he destroyed everything in there, the PC blue-screens; otherwise it recovers
+      variant,
       onFinished: () => this.finishPcEnding(),
     });
     this.endingFrame = null;
@@ -7648,10 +8207,10 @@ export class NeonMesaEngine {
       e.mesh.scale.set(1, 1, 1);
     }
 
-    // 2) Close-up: "what did i said, you fucking organic"
+    // 2) Close-up: "what did i say, you fucking organic"
     if (!c.line1 && t >= 1.9) {
       c.line1 = true;
-      this.setSubtitle('WHAT DID I SAID, YOU FUCKING ORGANIC.');
+      this.setSubtitle('WHAT DID I SAY, YOU FUCKING ORGANIC.');
       this.trauma = Math.max(this.trauma, 0.35);
       void synthAudio.playBoss2Line(BOSS2_LINE_1);
     }
@@ -9119,6 +9678,8 @@ export class NeonMesaEngine {
       if (d > RANGE + e.radius) continue;
       if (d > 0.6 && (dx * fx + dz * fz) / d < COS) continue;
       this.damageEnemy(e, damage, fx, fz);
+      // set alight: keeps burning (and taking damage) for a few seconds after the flame leaves
+      e.burnT = Math.max(e.burnT ?? 0, 3.5);
       if (Math.random() < 0.3) this.spawnParticles(e.x, 0.6 + Math.random() * 1.2, e.z, 1, 0xff8a1a, 2, 0.35);
     }
     // Crates and caches catch too
@@ -9266,6 +9827,9 @@ export class NeonMesaEngine {
     if (this.rewriteCine) this.rewriteCine.dispose();
     this.rewriteCine = null;
     this.endAeroIntro();
+    this.aeroCorruption = 0;
+    this.aeroWorld?.setCorruption(0);
+    this.ditherPass.setCorrupt(0);
     if (this.aeroWorld) this.aeroWorld.group.visible = false;
   }
 
@@ -9299,6 +9863,48 @@ export class NeonMesaEngine {
     this.advanceNorthPortal(this.rewriteBranch);
     this.trackAchievement('aero');
     this.beginAeroIntro();
+  }
+
+  /**
+   * How corrupt this room should be: none before the machine servant; his room starts going
+   * once he's down; each of the five rooms after it is worse; full from the Demiurge on.
+   */
+  private aeroCorruptionTarget(): number {
+    if (!this.aero || this.zone !== 'tree') return 0;
+    const w = this.wave;
+    if (w < AERO_SERVANT_WAVE) return 0;
+    if (w === AERO_SERVANT_WAVE) return this.portalOpen ? 1 / 6 : 0;
+    if (w < AERO_DEMIURGE_WAVE) return Math.min(1, (w - AERO_SERVANT_WAVE + 1) / 6);
+    return 1;
+  }
+
+  private updateAeroCorruption(dt: number) {
+    // VM's white room and the endings have their own sky and light: hands off (and no glitches)
+    if (this.inVmSpace || (this.cutsceneMode !== 'none' && this.cutsceneMode !== 'aero_intro')) {
+      this.ditherPass.setCorrupt(0);
+      return;
+    }
+    const target = this.aeroCorruptionTarget();
+    // walking into a room, it gets worse over a few seconds (a jump of more than a room snaps)
+    if (Math.abs(target - this.aeroCorruption) > 0.34) this.aeroCorruption = target;
+    else if (this.aeroCorruption < target) this.aeroCorruption = Math.min(target, this.aeroCorruption + dt * 0.05);
+    else this.aeroCorruption = Math.max(target, this.aeroCorruption - dt * 0.5);
+    this.applyAeroCorruption(this.aeroCorruption);
+  }
+
+  /** Corruption over the aero look: draining sky / fog / grass / light, plus the screen glitches. */
+  private applyAeroCorruption(c: number) {
+    this.aeroWorld?.setCorruption(c);
+    this.ditherPass.setCorrupt(c);
+    if (!(this.scene.fog instanceof THREE.FogExp2)) return;
+    this.scene.fog.color.setHex(0xbfe6ff).lerp(_scratchColor.setHex(0x5e5a64), c);
+    this.groundMat.color.setHex(0xffffff).lerp(_scratchColor.setHex(0x6e6a66), c);
+    this.hemiLight.color.setHex(0xcfeeff).lerp(_scratchColor.setHex(0x9a96a2), c);
+    this.hemiLight.groundColor.setHex(0x5ab84a).lerp(_scratchColor.setHex(0x3a3638), c);
+    this.keyLight.color.setHex(0xfff6e0).lerp(_scratchColor.setHex(0xc8c4cc), c);
+    this.keyBaseIntensity = 3.4 * (1 - c * 0.35);
+    this.hemiBaseIntensity = 2.3 * (1 - c * 0.3);
+    this.currentRimColorHex = _scratchColor.setHex(0x9fdcff).lerp(new THREE.Color(0x4a4650), c).getHex();
   }
 
   /** Sky, light, floor and set dressing of the aero world (called from applyZoneVisuals). */
@@ -10127,7 +10733,7 @@ export class NeonMesaEngine {
       });
       return g;
     }
-    return this.assets.enemies[id as EnemyArchetype] ?? null;
+    return this.assets.enemies[id as Exclude<EnemyArchetype, 'programmer'>] ?? null;
   }
 
   /** Remembers a creature for the almanac (saved once, the first time it's met). */
@@ -10152,6 +10758,7 @@ export class NeonMesaEngine {
     if (this.intro) this.finishIntro();
     this.teardownHateEnding();
     this.teardownDeath();
+    this.teardownProgrammer();
     this.resetAero();
     this.bossCine = null;
     this.removeVmRoom();
@@ -10478,6 +11085,8 @@ export class NeonMesaEngine {
 
   private emitHud() {
     const activeBoss = this.enemies.find((e) => e.archetype === 'boss' && e.state !== 'ko');
+    const prog = this.programmer ? this.enemies.find((e) => e.archetype === 'programmer') : undefined;
+    const progShown = this.programmer && this.programmer.brain.hudHack !== 'none' ? hudDisplay(this.programmer.brain.hudHack, this.playerHp, this.playerMaxHp) : null;
     const roundInfo = getSectorRoundInfo(this.wave);
     const activeW = WEAPONS[this.activeWeapon];
     const manualReloadRatio =
@@ -10485,7 +11094,7 @@ export class NeonMesaEngine {
         ? Math.max(0, Math.min(1, this.fireCooldown / activeW.fireInterval))
         : 0;
 
-    this.callbacks.onHudUpdate({
+    const snapshot: HudSnapshot = {
       hp: this.playerHp,
       maxHp: this.playerMaxHp,
       score: this.score,
@@ -10529,7 +11138,9 @@ export class NeonMesaEngine {
       pickupBanner: this.pickupBanner,
       newlyUnlockedSkin: this.newlyUnlockedSkin,
       damageFlashActive: this.damageFlash > 0.08,
-      boss: activeBoss
+      boss: prog
+        ? { name: 'O PROGRAMADOR', hp: Math.max(0, prog.hp), maxHp: prog.maxHp, enraged: false, bossLine: null }
+        : activeBoss
         ? {
             name: activeBoss.v2 ? `${ENEMY_CONFIGS.boss.label} · DANIFICADO` : ENEMY_CONFIGS.boss.label,
             hp: Math.max(0, activeBoss.hp),
@@ -10538,6 +11149,9 @@ export class NeonMesaEngine {
             bossLine: activeBoss.bossLine ?? null,
           }
         : null,
+      programmerPrompt: this.programmer?.brain.prompt ? { ...this.programmer.brain.prompt } : null,
+      hpShown: progShown ? progShown.hpCells : this.playerHp,
+      ammoShown: progShown ? progShown.ammoText : null,
       barricade:
         this.zone === 'clearing' && this.barricadeHp > 0
           ? {
@@ -10548,7 +11162,13 @@ export class NeonMesaEngine {
               totalPlanks: BARRICADE_TOTAL_PLANKS,
             }
           : null,
-    });
+    };
+    // Nothing changed since the last push: don't make React redraw the whole HUD
+    const key = JSON.stringify(snapshot);
+    if (key === this.lastHudKey) return;
+    this.lastHudKey = key;
+    this.perf?.hudPush();
+    this.callbacks.onHudUpdate(snapshot);
   }
 
   private screenToWorld(clientX: number, clientY: number): THREE.Vector3 | null {
@@ -10671,6 +11291,7 @@ export class NeonMesaEngine {
 
   public dispose() {
     this.disposed = true;
+    this.perf?.dispose();
     this.cineFadeEl.remove();
     this.cineBarTop.remove();
     this.cineBarBottom.remove();

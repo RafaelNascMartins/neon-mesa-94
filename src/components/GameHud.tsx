@@ -172,9 +172,14 @@ export function GameHud({
           <div className="flex flex-col gap-1.5" aria-label={`Integridade ${hud.hp} de ${hud.maxHp}`}>
             <span className="hud-label">INTEGRIDADE</span>
             <div className="flex items-center gap-[7px] pl-1">
-              {Array.from({ length: hud.maxHp }).map((_, idx) => (
-                <div key={idx} className="hud-cell hud-cell-lg" data-on={idx < hud.hp} data-critical={lowHp} />
-              ))}
+              {hud.hpShown === null ? (
+                // O Programador: chmod 000 /hud/hp
+                <span className="hud-num text-lg hud-hacked">???</span>
+              ) : (
+                Array.from({ length: hud.maxHp }).map((_, idx) => (
+                  <div key={idx} className={`hud-cell hud-cell-lg ${hud.hpShown !== hud.hp ? 'hud-hacked' : ''}`} data-on={idx < (hud.hpShown ?? hud.hp)} data-critical={lowHp} />
+                ))
+              )}
             </div>
           </div>
 
@@ -347,6 +352,16 @@ export function GameHud({
       </div>
 
       <ZoneTitle zone={hud.zone} label={zoneLabel} />
+
+      {/* O Programador's terminal: you read the command before it runs */}
+      {hud.programmerPrompt && (
+        <div className="fixed bottom-[92px] sm:bottom-[104px] inset-x-0 flex justify-center pointer-events-none px-4">
+          <div className="prog-terminal" data-typing={hud.programmerPrompt.typing}>
+            <span className="prog-terminal-user">programador@datatree:~$</span> {hud.programmerPrompt.text}
+            {hud.programmerPrompt.typing && <span className="prog-terminal-caret">█</span>}
+          </div>
+        </div>
+      )}
 
       {/* ─────────────── Top center: boss / barricade / banners ─────────────── */}
       {/* Sits below the corner panels so it never collides with them on narrow screens */}
@@ -580,8 +595,8 @@ export function GameHud({
               <span className="hud-key">{activeSlotIndex}</span>
               <span className="hud-title text-[11px] sm:text-sm truncate">{activeDef.shortName}</span>
             </span>
-            <span className="hud-num text-lg sm:text-[26px] hud-accent-text">
-              {activeAmmoFinite ? String(activeAmmo).padStart(2, '0') : '∞'}
+            <span className={`hud-num text-lg sm:text-[26px] hud-accent-text ${hud.ammoShown ? 'hud-hacked' : ''}`}>
+              {hud.ammoShown ?? (activeAmmoFinite ? String(activeAmmo).padStart(2, '0') : '∞')}
             </span>
           </div>
 

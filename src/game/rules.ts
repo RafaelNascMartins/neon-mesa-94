@@ -141,6 +141,22 @@ export const BOSS_FIRST_WAVE = 10;
 /** His second coming: five rooms after VM's (opens with a normal round, then he drops in). */
 export const BOSS_RETURN_WAVE = 15;
 
+/**
+ * The second world (the rewrite, Frutiger Aero): 5 rooms, boss 1 (the Demiurge's machine
+ * servant), 5 rooms going corrupt one by one, boss 2 (the Demiurge). Then the third world.
+ */
+export const AERO_FIRST_WAVE = BOSS_RETURN_WAVE + 1;
+export const AERO_SERVANT_WAVE = AERO_FIRST_WAVE + 5;
+export const AERO_DEMIURGE_WAVE = AERO_SERVANT_WAVE + 6;
+/** O Programador belongs to the third world (not built yet): for now he waits right after the Demiurge. */
+export const PROGRAMMER_WAVE = AERO_DEMIURGE_WAVE + 1;
+
+/** Room number (1–10) of an aero wave, or null for its two boss rooms. */
+export function aeroRoomNumber(wave: number): number | null {
+  if (wave === AERO_SERVANT_WAVE || wave === AERO_DEMIURGE_WAVE) return null;
+  return wave < AERO_SERVANT_WAVE ? wave - AERO_FIRST_WAVE + 1 : wave - AERO_SERVANT_WAVE + 5;
+}
+
 export function isBossWave(wave: number): boolean {
   return wave === BOSS_FIRST_WAVE || wave === BOSS_RETURN_WAVE;
 }
@@ -541,6 +557,10 @@ export function computeWeaponScreenshake(
   // Plasma fires ~10 shots/s: per-shot trauma must stay tiny or it stacks into a constant quake
   if (weapon.id === 'plasma') {
     return { trauma: 0.035, cameraKick: 0.015, hitstopSec: 0 };
+  }
+  // Maçarico and Canhão de Faces fire every 0.06s: just a faint rumble, not a quake
+  if (weapon.id === 'macarico' || weapon.id === 'faces') {
+    return { trauma: 0.018, cameraKick: 0.006, hitstopSec: 0 };
   }
 
   // Firing recoil & screenshake scaled directly by damage per trigger pull + ordnance power

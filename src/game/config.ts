@@ -671,6 +671,18 @@ export const ENEMY_CONFIGS: Record<EnemyArchetype, EnemyConfig> = {
     cooldownTime: 1.35,
     accentColor: 0x38bdf8,
   },
+  programmer: {
+    archetype: 'programmer',
+    label: 'O PROGRAMADOR',
+    hp: 4400,
+    speed: 6,
+    radius: 0.9,
+    scoreValue: 9000,
+    preferredRange: 9,
+    telegraphTime: 0.5,
+    cooldownTime: 1,
+    accentColor: 0xff1e3c,
+  },
   boss: {
     archetype: 'boss',
     label: 'CEM FACES',

@@ -1684,3 +1684,62 @@ html.hand-cursor * {
 @media (prefers-reduced-motion: reduce) {
   .zone-title, .zone-title-rule { animation: none; }
 }
+
+/* Death screen: the menu surfaces slowly out of the dark (backdrop first, then the window) */
+.gameover-backdrop {
+  animation: gameover-dim 1.6s ease-out both;
+}
+.gameover-window {
+  animation: gameover-rise 1.8s cubic-bezier(0.2, 0.7, 0.2, 1) 0.9s both;
+}
+@keyframes gameover-dim {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes gameover-rise {
+  0% { opacity: 0; transform: translateY(18px); filter: blur(6px); }
+  60% { filter: blur(0); }
+  100% { opacity: 1; transform: none; filter: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gameover-backdrop, .gameover-window { animation-duration: 0.01s; animation-delay: 0s; }
+}
+
+/* O Programador: his floating terminal, and the HUD values he's tampered with */
+.prog-terminal {
+  font-family: var(--font-terminal, 'VT323', monospace);
+  font-size: 22px;
+  line-height: 1.1;
+  color: #e8e8e8;
+  background: rgba(0, 0, 0, 0.86);
+  border: 1px solid rgba(255, 30, 60, 0.55);
+  box-shadow: 0 0 0 2px #000, 0 0 18px rgba(255, 30, 60, 0.25);
+  padding: 6px 12px;
+  white-space: pre;
+  max-width: 100%;
+  overflow: hidden;
+}
+.prog-terminal[data-typing='false'] {
+  color: #ff5068;
+}
+.prog-terminal-user {
+  color: #ff1e3c;
+}
+.prog-terminal-caret {
+  animation: prog-caret 0.6s steps(1) infinite;
+}
+@keyframes prog-caret {
+  50% { opacity: 0; }
+}
+.hud-hacked {
+  color: #ff1e3c !important;
+  text-shadow: 2px 0 #00f5ff, -2px 0 #ff1e3c;
+  animation: hud-hacked-jitter 0.12s steps(2) infinite;
+}
+@keyframes hud-hacked-jitter {
+  0% { transform: translate(0, 0); }
+  50% { transform: translate(1px, -1px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prog-terminal-caret, .hud-hacked { animation: none; }
+}

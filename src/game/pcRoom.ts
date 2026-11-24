@@ -4,12 +4,16 @@ import * as THREE from 'three';
  * After an ending: outside the PC, in 3D. First person, sitting at a desk in a dark bedroom at
  * night; the monitor is the only light. The game froze on its last frame (the bug), glitching.
  * The screen dies, "Reiniciando..." (pc_reiniciando.mp3), and it comes back to a plain desktop
- * (pc_religando.mp3): blue sky, a green hill. Then black.
+ * (pc_religando.mp3): blue sky, a green hill. Then black. (`restore`: the Control ending)
+ *
+ * `bsod` (the Hate ending): no reboot. The glitching frame crashes into a blue screen: he
+ * destroyed everything in there.
  *
  * The screen is a canvas redrawn as the scene goes; it also tints the light it throws on the room.
  */
 
-export type PcSound = 'reboot' | 'bootup';
+export type PcSound = 'reboot' | 'bootup' | 'crash';
+export type PcVariant = 'restore' | 'bsod';
 
 export interface PcRoomHost {
   camera: THREE.PerspectiveCamera;
@@ -24,9 +28,14 @@ export interface PcRoomHost {
   setSubtitle(text: string | null): void;
   play(id: PcSound): void;
   onFinished(): void;
+  /** What the screen does after the bug (default `restore`). */
+  variant?: PcVariant;
 }
 
 const AT = { off: 6.2, boot: 7.6, desktop: 10.4, out: 16.2, end: 17.6 };
+/** Blue-screen variant: the bug crashes straight into the stop screen. */
+const BS = { crash: 6.2, out: 15.4, end: 16.8 };
+type Stage = 'bug' | 'off' | 'boot' | 'desktop' | 'bsod';
 const SW = 640;
 const SH = 400;
 
@@ -315,7 +324,7 @@ export class PcRoomScene {
     return c;
   }
 
-  private drawScreen(stage: 'bug' | 'off' | 'boot' | 'desktop') {
+  private drawScreen(stage: Stage) {
     const g = this.screenCtx;
     const t = this.t;
     if (stage === 'bug') {
@@ -350,6 +359,8 @@ export class PcRoomScene {
       }
       g.fillStyle = `rgba(0,0,0,${Math.random() * 0.25})`;
       g.fillRect(0, 0, SW, SH);
+    } else if (stage === 'bsod') {
+      this.drawBsod(g, t - BS.crash);
     } else if (stage === 'off') {
       g.fillStyle = '#000';
       g.fillRect(0, 0, SW, SH);
@@ -400,6 +411,43 @@ export class PcRoomScene {
     this.screenTex.needsUpdate = true;
   }
 
+  /** The stop screen: blue, white monospace, a memory dump counting up. */
+  private drawBsod(g: CanvasRenderingContext2D, k: number) {
+    g.fillStyle = '#0a1fa8';
+    g.fillRect(0, 0, SW, SH);
+    // the first instant: a white CRT flash collapsing into it
+    if (k < 0.08) {
+      g.fillStyle = '#fff';
+      g.fillRect(0, SH / 2 - 3, SW, 6);
+      return;
+    }
+    const pct = Math.min(100, Math.max(0, Math.floor((k - 2.2) * 22)));
+    const lines = [
+      'Foi detectado um problema e o sistema foi desligado para evitar',
+      'danos ao computador.',
+      '',
+      'DATATREE_PROCESS_DESTROYED',
+      '',
+      'Se esta é a primeira vez que você vê esta tela de erro, reinicie',
+      'o computador. Se ela aparecer de novo, não há mais nada lá dentro',
+      'para restaurar. Todos os processos foram encerrados.',
+      '',
+      'Informações técnicas:',
+      '',
+      '*** STOP: 0x000000DE (0x0D10D10D, 0x00000000, 0xDEADBEEF, 0x00000094)',
+      '',
+      '***  antivirus.sys - Address 0xFFFFF880 base at 0xFFFFF880',
+      '',
+      k > 2.2 ? 'Iniciando o despejo da memória física' : '',
+      k > 2.2 ? `Despejando a memória física para o disco: ${pct}` : '',
+      pct >= 100 ? 'Despejo da memória física concluído.' : '',
+    ];
+    g.fillStyle = '#ffffff';
+    g.font = '11px "Lucida Console", Consolas, monospace';
+    g.textAlign = 'left';
+    for (let i = 0; i < lines.length; i++) g.fillText(lines[i], 14, 24 + i * 15);
+  }
+
   private once(id: string, at: number, fn: () => void) {
     if (this.t >= at && !this.fired.has(id)) {
       this.fired.add(id);
@@ -412,15 +460,34 @@ export class PcRoomScene {
     this.t += dt;
     const t = this.t;
     const h = this.host;
-    const stage = t < AT.off ? 'bug' : t < AT.boot ? 'off' : t < AT.desktop ? 'boot' : 'desktop';
+    const bsod = h.variant === 'bsod';
+    const stage: Stage = bsod
+      ? t < BS.crash
+        ? 'bug'
+        : 'bsod'
+      : t < AT.off
+        ? 'bug'
+        : t < AT.boot
+          ? 'off'
+          : t < AT.desktop
+            ? 'boot'
+            : 'desktop';
+    const out = bsod ? BS.out : AT.out;
+    const end = bsod ? BS.end : AT.end;
 
     // The person at the PC
     this.once('sayHuh', 1.9, () => h.setSubtitle('Huh... estranho...'));
     this.once('sayHuhX', 4.9, () => h.setSubtitle(null));
-    this.once('sayFinally', AT.desktop + 0.9, () => h.setSubtitle('Finalmente!'));
-    this.once('sayFinallyX', AT.desktop + 3.2, () => h.setSubtitle(null));
-    this.once('reboot', AT.boot, () => h.play('reboot'));
-    this.once('bootup', AT.desktop, () => h.play('bootup'));
+    if (bsod) {
+      this.once('crash', BS.crash, () => h.play('crash'));
+      this.once('sayNo', BS.crash + 2.6, () => h.setSubtitle('...Não. Não, não, não...'));
+      this.once('sayNoX', BS.crash + 5.6, () => h.setSubtitle(null));
+    } else {
+      this.once('sayFinally', AT.desktop + 0.9, () => h.setSubtitle('Finalmente!'));
+      this.once('sayFinallyX', AT.desktop + 3.2, () => h.setSubtitle(null));
+      this.once('reboot', AT.boot, () => h.play('reboot'));
+      this.once('bootup', AT.desktop, () => h.play('bootup'));
+    }
 
     // Screen at ~20fps (it's a canvas upload)
     this.redrawIn -= dt;
@@ -432,6 +499,9 @@ export class PcRoomScene {
     if (stage === 'bug') {
       this.screenLight.color.setHex(0xff2030);
       this.screenLight.intensity = 1.6 + Math.random() * 1.4;
+    } else if (stage === 'bsod') {
+      this.screenLight.color.setHex(0x2a48ff);
+      this.screenLight.intensity = t - BS.crash < 0.08 ? 3.5 : 2.2;
     } else if (stage === 'desktop') {
       this.screenLight.color.setHex(0x6aa8e8);
       this.screenLight.intensity = 2.4 * Math.min(1, (t - AT.desktop) / 1.2);
@@ -448,17 +518,20 @@ export class PcRoomScene {
 
     // First person: sitting, breathing; you lean in a little when it dies, back when it's back
     const o = h.origin;
-    const lean = THREE.MathUtils.smoothstep(t, AT.off - 1, AT.boot) * 0.12 - THREE.MathUtils.smoothstep(t, AT.desktop, AT.out) * 0.08;
+    // (blue screen: you lean in and stay there, staring)
+    const lean = bsod
+      ? THREE.MathUtils.smoothstep(t, BS.crash - 1, BS.crash + 3) * 0.16
+      : THREE.MathUtils.smoothstep(t, AT.off - 1, AT.boot) * 0.12 - THREE.MathUtils.smoothstep(t, AT.desktop, AT.out) * 0.08;
     this.eye.set(o.x + Math.sin(t * 0.5) * 0.012, o.y + 1.2 + Math.sin(t * 1.3) * 0.006, o.z - 0.05 - lean);
     this.look.set(o.x + Math.sin(t * 0.37) * 0.02, o.y + 1.05, o.z - 1.1);
     h.aim(this.eye, this.look);
 
     // Fade in from black, fade out at the end
     if (t < 1.4) h.fadeEl.style.opacity = String(1 - t / 1.4);
-    else if (t > AT.out) h.fadeEl.style.opacity = String(Math.min(1, (t - AT.out) / (AT.end - AT.out - 0.2)));
+    else if (t > out) h.fadeEl.style.opacity = String(Math.min(1, (t - out) / (end - out - 0.2)));
     else h.fadeEl.style.opacity = '0';
 
-    this.once('end', AT.end, () => this.finish());
+    this.once('end', end, () => this.finish());
   }
 
   finish() {

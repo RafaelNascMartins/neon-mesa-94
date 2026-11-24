@@ -100,6 +100,9 @@ const INITIAL_HUD: HudSnapshot = {
   damageFlashActive: false,
   boss: null,
   barricade: null,
+  programmerPrompt: null,
+  hpShown: PLAYER_MAX_HP,
+  ammoShown: null,
 };
 
 export default function App() {
@@ -188,13 +191,22 @@ export default function App() {
   // From the title, a run boots through the terminal sequence first
   const [booting, setBooting] = useState(false);
   // Dev: ?ending=odio waits for a click, then plays the Ódio ending (audio unlocked by the click)
-  const [devEnding, setDevEnding] = useState(false);
+  // Dev: ?boss=programador (&soul=odio|caos|controle) jumps to his floor, same click gate
+  const [devEnding, setDevEnding] = useState<false | 'odio' | 'programador' | 'aero'>(false);
   const startDevEnding = useCallback(() => {
+    const what = devEnding;
     setDevEnding(false);
     synthAudio.unlock();
+    if (what === 'programador' || what === 'aero') {
+      const s = new URLSearchParams(window.location.search).get('soul');
+      const soul: SoulId = s === 'odio' || s === 'caos' || s === 'controle' ? s : 'controle';
+      if (what === 'aero') engineRef.current?.devAero(soul, new URLSearchParams(window.location.search).get('sala'));
+      else engineRef.current?.devProgrammer(soul);
+      return;
+    }
     engineRef.current?.startNewRun(1, 'odio');
     engineRef.current?.playHateEnding();
-  }, []);
+  }, [devEnding]);
   const startBoot = useCallback(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setShowSkins(false);
@@ -264,7 +276,10 @@ export default function App() {
         }
         // Dev only: ?ending=odio jumps straight into the Ódio ending (no final boss yet)
         // Starts on a click: opened straight from a link, the browser blocks audio until then
-        if (import.meta.env.DEV && params.get('ending') === 'odio') setDevEnding(true);
+        if (import.meta.env.DEV && params.get('ending') === 'odio') setDevEnding('odio');
+        if (import.meta.env.DEV && params.get('boss') === 'programador') setDevEnding('programador');
+        // Dev: ?mundo=2 starts in the second (aero) world's first room
+        if (import.meta.env.DEV && params.get('mundo') === '2') setDevEnding('aero');
       },
     });
     engineRef.current = engine;
@@ -413,6 +428,7 @@ export default function App() {
           onOpenSkins={() => setShowSkins(true)}
           onOpenLeaderboard={openLeaderboard}
           onSubmitScore={handleSubmitScore}
+          onQuitToTitle={() => engineRef.current?.returnToTitle()}
         />
       )}
 
@@ -440,7 +456,7 @@ export default function App() {
           onClick={startDevEnding}
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black font-terminal text-[28px] tracking-[0.2em] text-[#8f897d] hover:text-[#e9e4d8]"
         >
-          CLIQUE PARA ASSISTIR
+          {devEnding === 'odio' ? 'CLIQUE PARA ASSISTIR' : 'CLIQUE PARA JOGAR'}
         </button>
       )}
 

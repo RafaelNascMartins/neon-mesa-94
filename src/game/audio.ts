@@ -2569,6 +2569,82 @@ class SynthAudioEngine {
   }
 
   /** CRT power/glitch burst when the terminal hands over to the game. */
+  /** Hate ending, the grey wasteland: a low wind that never lets up. Returns a stop (fade) function. */
+  public playAshWind(): (fadeSec?: number) => void {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || !this.noiseBuffer || this.muted) return () => {};
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 420;
+    lp.Q.value = 0.6;
+    // the gusts: the filter breathes slowly
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.13;
+    const lfoAmt = ctx.createGain();
+    lfoAmt.gain.value = 220;
+    lfo.connect(lfoAmt);
+    lfoAmt.connect(lp.frequency);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.5, now + 1.6);
+    src.connect(lp);
+    lp.connect(g);
+    g.connect(this.sfxGain);
+    src.start(now);
+    lfo.start(now);
+    let stopped = false;
+    return (fadeSec = 0.8) => {
+      if (stopped || !this.ctx) return;
+      stopped = true;
+      const t = this.ctx.currentTime;
+      g.gain.cancelScheduledValues(t);
+      g.gain.setValueAtTime(Math.max(0.0001, g.gain.value), t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(0.05, fadeSec));
+      try {
+        src.stop(t + fadeSec + 0.05);
+        lfo.stop(t + fadeSec + 0.05);
+      } catch {
+        /* already stopped */
+      }
+    };
+  }
+
+  /** Something huge breaking off and coming down (size 0..1). */
+  public playCrumble(size = 0.5) {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    this.noiseBurst(now, 0.6 + size * 0.9, 0.35 + size * 0.45, 'lowpass', 900, 120, { verb: 0.35 });
+    this.noiseBurst(now + 0.05, 0.25, 0.18 + size * 0.2, 'bandpass', 2400, 700, { q: 1.2, crush: true });
+    this.triggerPunchBody(now + 0.02, 70, 28, 0.5 + size * 0.6, 0.5 + size * 0.5);
+  }
+
+  /** The Tree's whole structure groaning as it sinks. */
+  public playGroan() {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    this.whine(now, 62 + Math.random() * 20, 38, 1.8, 0.12, 'sawtooth');
+    this.whine(now + 0.1, 140, 90, 1.4, 0.04, 'triangle');
+  }
+
+  /** The PC dies into a blue screen: a hard pop, a short electrical buzz, then quiet. */
+  public playPcCrash() {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    this.noiseBurst(now, 0.12, 0.6, 'lowpass', 2200, 400, { crush: true });
+    this.whine(now, 120, 118, 0.7, 0.12, 'square');
+    this.whine(now, 15600, 15600, 2.4, 0.025, 'sine');
+  }
+
   public playCrtGlitch() {
     if (this.muted) return;
     const ctx = this.ensureContext();

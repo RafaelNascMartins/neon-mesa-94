@@ -30,7 +30,8 @@ import propWireframeTowerUrl from '../assets/models/prop_wireframe_tower.glb?url
 
 export interface LoadedGlbAssets {
   hero: THREE.Group;
-  enemies: Record<EnemyArchetype, THREE.Group>;
+  /** (O Programador has no model of his own: he's built at runtime.) */
+  enemies: Record<Exclude<EnemyArchetype, 'programmer'>, THREE.Group>;
   weapons: Record<WeaponId, THREE.Group>;
   cactus: THREE.Group;
   crate: THREE.Group;

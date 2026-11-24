@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { synthAudio } from './audio';
+import { buildAeroDecor } from './aeroDecor';
+import { AeroCorruptionFx, paintCorruptSky } from './aeroCorruption';
 import { buildFlyerModel } from './enemyFlyer';
 import { buildEnemyModel, jellyMaterial } from './enemyModels';
 import type { EnemyArchetype } from './types';
@@ -111,6 +113,8 @@ function towerTexture(): THREE.CanvasTexture {
 export interface AeroWorld {
   group: THREE.Group;
   update(elapsed: number, dt: number): void;
+  /** How corrupt the world is (0..1): colour drains, cracks, black voxels, the sky dies. */
+  setCorruption(c: number): void;
 }
 
 export function buildAeroWorld(): AeroWorld {
@@ -235,12 +239,29 @@ export function buildAeroWorld(): AeroWorld {
     flies.push({ g: bf, l, r, ph: rand() * 6, cx: (rand() - 0.5) * 40, cz: (rand() - 0.5) * 40, rad: 3 + rand() * 6 });
   }
 
+  // Water globs in the air and tech in glass cases, all round the arena
+  const decor = buildAeroDecor(rand);
+  g.add(decor.group);
+
+  // (built last: it snapshots every material above to drain them later)
+  const corruption = new AeroCorruptionFx(g);
+  let skyLevel = 0;
+
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const sc = new THREE.Vector3();
   const p = new THREE.Vector3();
   return {
     group: g,
+    setCorruption(c: number) {
+      corruption.set(c);
+      if (Math.abs(c - skyLevel) > 0.01 || (c === 0 && skyLevel !== 0)) {
+        skyLevel = c;
+        const sky = aeroSkyTexture();
+        paintCorruptSky(sky.image as HTMLCanvasElement, c);
+        sky.needsUpdate = true;
+      }
+    },
     update(elapsed: number, dt: number) {
       for (let i = 0; i < BUB; i++) {
         const b = bubbleState[i];
@@ -273,6 +294,8 @@ export function buildAeroWorld(): AeroWorld {
         f.r.rotation.y = -flap;
       }
       clouds.position.x = Math.sin(elapsed * 0.02) * 6;
+      decor.update(elapsed);
+      corruption.update(elapsed);
     },
   };
 }

@@ -17,6 +17,8 @@ export interface DitherPostProcessor {
   setClean: (v: number) => void;
   /** Film grain + scanline strength (1 = normal). */
   setGrain: (v: number) => void;
+  /** The aero world's corruption (0..1): tears, dead pixels, black blocks, colour draining. */
+  setCorrupt: (v: number) => void;
   render: (
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -46,6 +48,7 @@ uniform float uDamageFlash;
 uniform vec3 uRimColor;
 uniform float uClean; // 0 = grimy industrial grade, 1 = clean glossy Frutiger Aero look
 uniform float uGrain; // film grain + scanlines amount (1 = normal)
+uniform float uCorrupt; // aero world corruption, 0..1
 varying vec2 vUv;
 
 float bayer4x4(vec2 pos) {
@@ -91,8 +94,17 @@ void main() {
     snappedUv.x = clamp(snappedUv.x + glitch, 0.0, 1.0);
   }
 
+  // Corruption: bands of the picture tear sideways for a moment
+  if (uCorrupt > 0.001) {
+    float band = floor(pixelCoord.y / 5.0);
+    float tick = floor(uTime * 7.0);
+    if (hash12(vec2(band, tick)) > 1.0 - uCorrupt * 0.16) {
+      snappedUv.x = fract(snappedUv.x + (hash12(vec2(band + 7.0, tick)) - 0.5) * 0.14 * uCorrupt);
+    }
+  }
+
   // Constant lens-like chromatic aberration toward the edges (+ a big kick on damage)
-  vec2 caDir = centered * (0.0035 + edgeDist * 0.004 + uDamageFlash * 0.022);
+  vec2 caDir = centered * (0.0035 + edgeDist * 0.004 + uDamageFlash * 0.022 + uCorrupt * 0.01);
   vec3 col;
   col.r = texture2D(tDiffuse, clamp(snappedUv + caDir, 0.0, 1.0)).r;
   col.g = texture2D(tDiffuse, snappedUv).g;
@@ -121,6 +133,20 @@ void main() {
 
   // Heavy vignette
   col *= mix(1.0, mix(0.32, 0.82, uClean), smoothstep(0.32, 1.08, edgeDist));
+
+  // Corruption: colour drains to a dead grey; dead pixels (stuck black) spread; black blocks
+  // flicker; now and then the whole frame inverts for an instant
+  if (uCorrupt > 0.001) {
+    float l2 = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(col, vec3(l2) * vec3(0.95, 0.94, 1.0), uCorrupt * 0.62);
+    col *= 1.0 - uCorrupt * 0.3;
+    vec2 cell = floor(pixelCoord / 2.0);
+    if (hash12(cell * 1.37 + 4.1) < uCorrupt * uCorrupt * 0.03) col = vec3(0.0);
+    if (hash12(cell + floor(uTime * 3.0) * vec2(11.0, 7.0)) < uCorrupt * 0.008) col = vec3(0.0);
+    vec2 block = floor(pixelCoord / 14.0);
+    if (hash12(block + floor(uTime * 1.7) * 13.0) < uCorrupt * uCorrupt * 0.012) col = vec3(0.0);
+    if (hash12(vec2(floor(uTime * 12.0), 5.0)) < uCorrupt * 0.012) col = vec3(1.0) - col;
+  }
 
   // Damage flash (peaks at edges, keeps center readable)
   float vignetteMask = smoothstep(0.25, 0.88, edgeDist);
@@ -172,6 +198,7 @@ export function createDitherPostProcessor(
       uRimColor: { value: new THREE.Color(0xff5a22) },
       uClean: { value: 0 },
       uGrain: { value: DEFAULT_GRAIN },
+      uCorrupt: { value: 0 },
     },
     vertexShader: DITHER_VERTEX,
     fragmentShader: DITHER_FRAGMENT,
@@ -215,6 +242,9 @@ export function createDitherPostProcessor(
     },
     setGrain(v: number) {
       material.uniforms.uGrain.value = v;
+    },
+    setCorrupt(v: number) {
+      material.uniforms.uCorrupt.value = v;
     },
     dispose() {
       renderTarget.dispose();

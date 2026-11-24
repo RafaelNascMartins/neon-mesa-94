@@ -125,9 +125,10 @@ interface GameOverModalProps {
   onOpenSkins: () => void;
   onOpenLeaderboard: () => void;
   onSubmitScore: (name: string) => Promise<void>;
+  onQuitToTitle: () => void;
 }
 
-export function GameOverModal({ summary, onPlayAgain, onOpenSkins, onOpenLeaderboard, onSubmitScore }: GameOverModalProps) {
+export function GameOverModal({ summary, onPlayAgain, onOpenSkins, onOpenLeaderboard, onSubmitScore, onQuitToTitle }: GameOverModalProps) {
   const [callsign, setCallsign] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -155,8 +156,8 @@ export function GameOverModal({ summary, onPlayAgain, onOpenSkins, onOpenLeaderb
   ];
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center p-4 px-backdrop">
-      <div role="dialog" aria-modal="true" aria-labelledby="gameover-title" className="px-window w-full max-w-[460px] flex flex-col">
+    <div className="fixed inset-0 z-30 flex items-center justify-center p-4 px-backdrop gameover-backdrop">
+      <div role="dialog" aria-modal="true" aria-labelledby="gameover-title" className="px-window gameover-window w-full max-w-[460px] flex flex-col">
         <div className="px-titlebar px-titlebar-danger">
           <span>process killed</span>
           <span>exit 137</span>
@@ -240,6 +241,9 @@ export function GameOverModal({ summary, onPlayAgain, onOpenSkins, onOpenLeaderb
                 Placar
               </button>
             </div>
+            <button type="button" onClick={onQuitToTitle} className="px-btn w-full">
+              Menu principal
+            </button>
           </div>
         </div>
       </div>

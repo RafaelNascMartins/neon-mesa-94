@@ -81,8 +81,20 @@ export function snapshotLeaves(root: THREE.Object3D, visibleOnly = false): Batch
   return snap;
 }
 
+export interface BatchJob {
+  parent: THREE.Object3D;
+  meshes: THREE.Mesh[];
+}
+
 /** Merges still leaves per (parent, material, shadow flags, attribute layout). Returns draw calls saved. */
 export function batchStaticLeaves(root: THREE.Object3D, snap: BatchSnapshot): number {
+  let saved = 0;
+  for (const job of planStaticBatches(root, snap)) saved += runBatchJob(job);
+  return saved;
+}
+
+/** Groups the still leaves into merge jobs (cheap); run them with `runBatchJob`, spread over frames. */
+export function planStaticBatches(root: THREE.Object3D, snap: BatchSnapshot): BatchJob[] {
   const buckets = new Map<string, { parent: THREE.Object3D; meshes: THREE.Mesh[] }>();
   root.traverse((o) => {
     if (!isCandidate(o) || !o.parent) return;
@@ -105,9 +117,14 @@ export function batchStaticLeaves(root: THREE.Object3D, snap: BatchSnapshot): nu
     b.meshes.push(o);
   });
 
-  let saved = 0;
-  for (const { parent, meshes } of buckets.values()) {
-    if (meshes.length < 2) continue;
+  return [...buckets.values()].filter((b) => b.meshes.length >= 2);
+}
+
+/** Merges one job's meshes into a single draw call. Returns draw calls saved. */
+export function runBatchJob({ parent, meshes }: BatchJob): number {
+  // something changed since the plan (zone left, mesh removed): skip it
+  if (meshes.some((m) => m.parent !== parent)) return 0;
+  {
     const geos: THREE.BufferGeometry[] = [];
     for (const m of meshes) {
       const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
@@ -117,7 +134,7 @@ export function batchStaticLeaves(root: THREE.Object3D, snap: BatchSnapshot): nu
     }
     const merged = mergeGeometries(geos, false);
     for (const g of geos) g.dispose();
-    if (!merged) continue;
+    if (!merged) return 0;
     merged.computeBoundingSphere();
     merged.computeBoundingBox();
     const first = meshes[0];
@@ -131,9 +148,8 @@ export function batchStaticLeaves(root: THREE.Object3D, snap: BatchSnapshot): nu
     batched.updateMatrix();
     parent.add(batched);
     for (const m of meshes) parent.remove(m);
-    saved += meshes.length - 1;
+    return meshes.length - 1;
   }
-  return saved;
 }
 
 /** Freezes the local matrices of a whole static subtree (skips per-frame matrix recompose). */
