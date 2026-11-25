@@ -31,6 +31,7 @@ export type VmItemId =
   | 'willow'
   // Actives (F key, recharge by dealing damage)
   | 'bomb'
+  | 'dynamite'
   | 'ironSkin'
   | 'pacify';
 

@@ -117,6 +117,7 @@ export const ITEM_LORE: Partial<Record<VmItemId, string>> = {
   pinball: 'TILT. Cada quique vale ponto. Ninguém sabe onde fica a placa de recorde.',
   shades: 'Você é tão badass que sabe até quando vai ser a morte dos inimigos. Use com moderação.',
   gunboots: 'Atira pelos calcanhares. Ótimo pra fugir, péssimo pra quadrilha junina.',
+  dynamite: 'Três bananas amarradas com arame. O pavio chia por três segundos — tempo de sobra pra se arrepender.',
   bomb: 'Clássica, redonda, com pavio. Comprada no mesmo lugar que os desenhos animados compram.',
   ironSkin: 'Por 5 segundos você vira uma estátua de chumbo que devolve bala. Não tente nadar. Nem pular.',
   pacify: 'Um papel amassado com a assinatura de todo mundo prometendo parar de brigar. Tem uma assinatura que é só um desenho de caveira. Vale por 5 segundos.',

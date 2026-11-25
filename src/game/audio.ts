@@ -93,7 +93,7 @@ const ODIO_LOOP = { start: 2.505, end: 6.451 };
 /** A playing ending clip: call it to stop (with a fade); `fadeTo` glides its volume. */
 export type EndingClip = ((fadeSec?: number) => void) & { fadeTo(gain: number, sec: number): void };
 
-export type EndingSample = 'cowboyTalk' | 'pcReboot' | 'pcBootUp' | 'maskFall' | 'chomp' | 'finalScene' | 'deathShatter' | 'youDied' | 'carEngine' | 'carImpact' | 'torch' | 'judge' | 'pistol' | 'judgeShot' | 'bossSteps' | 'shotgunShot' | 'shotgunRack' | 'coiceShot' | 'crossbow' | 'health' | 'gate' | 'bazooka' | 'slash1' | 'slash2' | 'nails' | 'hammerHit' | 'hammerWhiff';
+export type EndingSample = 'cowboyTalk' | 'pcReboot' | 'pcBootUp' | 'maskFall' | 'chomp' | 'finalScene' | 'deathShatter' | 'youDied' | 'carEngine' | 'carImpact' | 'torch' | 'judge' | 'pistol' | 'judgeShot' | 'bossSteps' | 'shotgunShot' | 'shotgunRack' | 'coiceShot' | 'crossbow' | 'health' | 'gate' | 'bazooka' | 'slash1' | 'slash2' | 'nails' | 'hammerHit' | 'hammerWhiff' | 'shotgunNew1' | 'shotgunNew2' | 'cd1' | 'cd2' | 'chainLoop' | 'facesLoop';
 const ENDING_SAMPLE_URLS: Record<EndingSample, string> = {
   cowboyTalk: `${ASSET_BASE}cowboy_falando.mp3`,
   pcReboot: `${ASSET_BASE}pc_reiniciando.mp3`,
@@ -122,6 +122,12 @@ const ENDING_SAMPLE_URLS: Record<EndingSample, string> = {
   nails: `${ASSET_BASE}arma_de_pregos.mp3`, // 8 takes of the nail gun, see NAIL_TAKES
   hammerHit: `${ASSET_BASE}marreta.mp3`,
   hammerWhiff: `${ASSET_BASE}marreta_swing_no_ar.mp3`,
+  shotgunNew1: `${ASSET_BASE}escopeta_nova1.mp3`,
+  shotgunNew2: `${ASSET_BASE}escopeta_nova2.mp3`,
+  cd1: `${ASSET_BASE}cd_1.mp3`,
+  cd2: `${ASSET_BASE}cd_2.mp3`,
+  chainLoop: `${ASSET_BASE}corrente.mp3`, // the held lightning (looped over its steady stretch)
+  facesLoop: `${ASSET_BASE}faces.mp3`, // the Canhão de Faces pouring out faces (looped, made robotic)
 };
 /** Where each take of the nail gun starts in its clip (s). */
 const NAIL_TAKES = [0.7, 3.9, 6.4, 8.63, 9.99, 11.62, 13.19, 15.02];
@@ -682,7 +688,19 @@ class SynthAudioEngine {
     gain = 0.9,
     loop = false,
     /** rate: playback speed (pitch); offset/duration: play just a slice of the clip (s). */
-    opts: { rate?: number; offset?: number; duration?: number; quiet?: boolean; fadeAt?: number; fadeLen?: number } = {}
+    opts: {
+      rate?: number;
+      offset?: number;
+      duration?: number;
+      quiet?: boolean;
+      fadeAt?: number;
+      fadeLen?: number;
+      /** Loop only this stretch of the clip (s). */
+      loopStart?: number;
+      loopEnd?: number;
+      /** Ring-modulated + metallic comb: makes a voice/noise sound like a machine. */
+      robot?: boolean;
+    } = {}
   ): EndingClip {
     const ctx = this.muted ? null : this.ensureContext();
     const pending = this.endingBuffers[id];
@@ -700,12 +718,42 @@ class SynthAudioEngine {
         const src = ctx.createBufferSource();
         src.buffer = buf;
         src.loop = loop;
+        if (loop && opts.loopEnd !== undefined) {
+          src.loopStart = opts.loopStart ?? 0;
+          src.loopEnd = opts.loopEnd;
+        }
         if (opts.rate) src.playbackRate.value = opts.rate;
         const g = ctx.createGain();
         g.gain.value = gain;
-        src.connect(g);
+        if (opts.robot) {
+          // ring modulator (the "robot voice" wobble) into a short metallic comb
+          const ring = ctx.createGain();
+          ring.gain.value = 0;
+          const lfo = ctx.createOscillator();
+          lfo.type = 'square';
+          lfo.frequency.value = 62;
+          const depth = ctx.createGain();
+          depth.gain.value = 1;
+          lfo.connect(depth);
+          depth.connect(ring.gain);
+          lfo.start();
+          const comb = ctx.createDelay(0.05);
+          comb.delayTime.value = 0.007;
+          const fb = ctx.createGain();
+          fb.gain.value = 0.55;
+          comb.connect(fb);
+          fb.connect(comb);
+          src.connect(ring);
+          ring.connect(g);
+          ring.connect(comb);
+          comb.connect(g);
+          src.addEventListener('ended', () => lfo.stop());
+        } else {
+          src.connect(g);
+        }
         g.connect(out);
-        if (opts.offset !== undefined || opts.duration !== undefined) src.start(0, opts.offset ?? 0, opts.duration);
+        if (loop && opts.offset !== undefined) src.start(0, opts.offset);
+        else if (opts.offset !== undefined || opts.duration !== undefined) src.start(0, opts.offset ?? 0, opts.duration);
         else src.start();
         if (opts.fadeAt !== undefined) {
           // fade out from fadeAt over fadeLen and stop there (keeps a long clip from cutting off dead)
@@ -2082,7 +2130,8 @@ class SynthAudioEngine {
   /** Sledgehammer: the heavy crunch when it lands on something, the whoosh when it hits air. */
   public playHammer(connected: boolean) {
     if (this.muted) return;
-    if (connected) this.playEndingSample('hammerHit', 0.8, false, { quiet: true, fadeAt: 1.1, fadeLen: 0.5 });
+    // a different crunch every time: pitch, weight and a touch of where in the clip it starts
+    if (connected) this.playEndingSample('hammerHit', 0.7 + Math.random() * 0.2, false, { quiet: true, rate: 0.82 + Math.random() * 0.3, offset: Math.random() * 0.03, fadeAt: 1.1, fadeLen: 0.5 });
     else this.playEndingSample('hammerWhiff', 0.7, false, { quiet: true, rate: 0.95 + Math.random() * 0.1 });
   }
 
@@ -2127,7 +2176,15 @@ class SynthAudioEngine {
     // Recorded shots
     const rec = (id: EndingSample, gain: number, o: { fadeAt?: number; fadeLen?: number; duration?: number; offset?: number } = {}) =>
       this.playEndingSample(id, gain, false, { rate: pitchJitter, quiet: true, ...o });
-    if (weapon === 'shotgun') return void rec('shotgunShot', 0.6);
+    if (weapon === 'shotgun') {
+      this.slashAlt = !this.slashAlt;
+      return void rec(this.slashAlt ? 'shotgunNew1' : 'shotgunNew2', 0.6, { fadeAt: 1.0, fadeLen: 0.5 });
+    }
+    if (weapon === 'disco') {
+      this.slashAlt = !this.slashAlt;
+      return void rec(this.slashAlt ? 'cd1' : 'cd2', 0.6, { fadeAt: 0.5, fadeLen: 0.25 });
+    }
+    if (weapon === 'faces') return; // a looped, robotic stream (engine: faces loop)
     if (weapon === 'coice') return void rec('coiceShot', 0.65);
     if (weapon === 'besta') return void rec('crossbow', 0.75);
     // the clip opens on half a second of silence: start right at the launch, fade before the blast
@@ -2168,12 +2225,6 @@ class SynthAudioEngine {
       if (Math.random() < 0.25) this.noiseBurst(now, 0.03, 0.08, 'bandpass', 2600, 1800, { q: 2, crush: true });
       return;
     }
-    if (weapon === 'disco') {
-      // A spinning disc whirring out of the tray
-      this.whine(now, 600 * pitchJitter, 1800, 0.22, 0.07, 'square');
-      this.noiseBurst(now, 0.08, 0.2, 'highpass', 3000, 2000, { crush: true });
-      return;
-    }
     if (weapon === 'corrente') {
       // Electric crack and buzz
       this.noiseBurst(now, 0.12, 0.42, 'highpass', 2400 * pitchJitter, 5200, { crush: true, verb: 0.2 });
@@ -2200,13 +2251,6 @@ class SynthAudioEngine {
       // Heavy-frame magnum crack
       this.triggerPunchBody(now, 165 * pitchJitter, 36, 0.14, 0.7);
       this.noiseBurst(now, 0.12, 0.55, 'bandpass', 1700, 1500, { crush: true, verb: 0.2 });
-      return;
-    }
-    if (weapon === 'faces') {
-      // A glitchy chirp per face, pitch walking with the spiral
-      const f = 500 + Math.random() * 700;
-      this.whine(now, f * 2, f, 0.07, 0.05, 'square');
-      this.noiseBurst(now, 0.04, 0.12, 'bandpass', 2600, 2600, { q: 3, crush: true });
       return;
     }
 
@@ -2585,7 +2629,7 @@ class SynthAudioEngine {
     const ctx = this.ensureContext();
     if (!ctx || !this.sfxGain) return;
     let t = ctx.currentTime;
-    if (weapon === 'shotgun' && kind !== 'swap') {
+    if (weapon === 'shotgun') {
       // the recorded rack: picking the shotgun up / pumping it ready
       this.playEndingSample('shotgunRack', 0.7, false, { quiet: true });
       return;
@@ -2633,8 +2677,8 @@ class SynthAudioEngine {
       this.whine(t + 0.06, 110, 190, 0.24, 0.1, 'square');
       this.metalClick(t + 0.32, 2200, 0.32);
     } else {
-      // Ballistic rack: back, forward
-      const low = weapon === 'shotgun';
+      // Ballistic rack: back, forward (the shotgun has its own recorded rack)
+      const low = weapon === 'coice';
       this.metalClick(t, low ? 1700 : 2600, 0.32);
       this.metalClick(t + 0.012, low ? 3400 : 5200, 0.12);
       this.metalClick(t + (low ? 0.16 : 0.12), low ? 1400 : 2100, 0.34);

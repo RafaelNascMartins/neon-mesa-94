@@ -63,6 +63,7 @@ export const ITEM_ARCHETYPE: Partial<Record<VmItemId, SoulId>> = {
   ricochet: 'caos',
   gunboots: 'caos',
   bomb: 'caos',
+  dynamite: 'caos',
   // Controle: slows, stuns, steering, defense
   iceAmmo: 'controle',
   homing: 'controle',

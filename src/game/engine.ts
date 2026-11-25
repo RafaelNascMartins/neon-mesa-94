@@ -487,6 +487,10 @@ export class NeonMesaEngine {
   private ownedWeapons: WeaponId[] = ['pistol'];
   /** The Maçarico's looping roar while its trigger is held (null = silent). */
   private torchClip: EndingClip | null = null;
+  /** Corrente.exe's held crackle and the Canhão de Faces' robotic stream (looped while firing). */
+  private chainClip: EndingClip | null = null;
+  private facesClip: EndingClip | null = null;
+  private facesLastFire = -10;
   /** "ARMA SEM MUNIÇÃO" blinking at the bottom (seconds left). */
   private noAmmoTimer = 0;
   private torchLastFire = -10;
@@ -2447,6 +2451,10 @@ export class NeonMesaEngine {
       }
     }
     // The Maçarico's roar loops while the flame is going; let go (or pause) and it dies down
+    if (this.facesClip && (this.phase !== 'playing' || this.elapsedSec - this.facesLastFire > 0.15)) {
+      this.facesClip(0.12);
+      this.facesClip = null;
+    }
     if (this.torchClip && (this.phase !== 'playing' || this.elapsedSec - this.torchLastFire > 0.14)) {
       this.torchClip(0.18);
       this.torchClip = null;
@@ -3592,6 +3600,10 @@ export class NeonMesaEngine {
       this.fireChainLightning(spawnX, spawnZ, forwardX, forwardZ, weapon.damage);
     } else {
       const isFaces = this.activeWeapon === 'faces';
+      if (isFaces) {
+        this.facesLastFire = this.elapsedSec;
+        if (!this.facesClip) this.facesClip = synthAudio.playEndingSample('facesLoop', 0.5, true, { quiet: true, robot: true, offset: 0.2, loopStart: 0.2, loopEnd: 6.0 });
+      }
       const count = isFaces ? 2 : weapon.pellets;
       for (let pIdx = 0; pIdx < count; pIdx++) {
         let spreadAngle =
@@ -4425,10 +4437,10 @@ export class NeonMesaEngine {
         // A flat spinning disc
         slot.coreMesh.geometry = this.discGeo;
         slot.coreMesh.rotation.set(0, 0, 0);
-        slot.coreMesh.scale.setScalar(1);
+        slot.coreMesh.scale.setScalar(1.9); // big, readable CDs
         slot.haloMesh.visible = true;
         haloMat.color.setHex(0xff5ac8);
-        slot.haloMesh.scale.setScalar(0.6);
+        slot.haloMesh.scale.setScalar(1.1);
         slot.haloMesh.rotation.set(Math.PI / 2, 0, 0);
       } else if (weapon === 'shotgun' || weapon === 'coice') {
         slot.coreMesh.geometry = this.projectileGeo;
@@ -10287,6 +10299,26 @@ export class NeonMesaEngine {
       // the active item: a longer fuse, beeping faster and faster over a red ring showing its reach
       this.bombs.push({ mesh, sx: this.playerX, sz: this.playerZ, tx: clamped.x, tz: clamped.z, t: 0, fuse: 1.7, item: true, beepT: 0 });
       synthAudio.playWeaponPickup('rocket', 'equip');
+    } else if (id === 'dynamite') {
+      // like the bomb, but a slow hissing fuse and a much bigger blast
+      const t = this.aimPoint(10);
+      const clamped = resolveCircleObstacleCollision(t.x, t.z, 0.4, [], ARENA_RADIUS - 1);
+      const mesh = new THREE.Group();
+      const stickMat = new THREE.MeshStandardMaterial({ color: 0xc8281e, emissive: 0xc8281e, emissiveIntensity: 0.35, roughness: 0.6 });
+      for (const [dx, dy] of [[-0.11, 0], [0.11, 0], [0, 0.18]] as [number, number][]) {
+        const st = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.7, 8), stickMat);
+        st.rotation.z = Math.PI / 2;
+        st.position.set(0, dy, dx);
+        mesh.add(st);
+      }
+      const fuse = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffb030, toneMapped: false }));
+      fuse.position.set(0.38, 0.22, 0);
+      fuse.name = 'fuse';
+      mesh.add(fuse);
+      mesh.position.set(this.playerX, 1.2, this.playerZ);
+      this.scene.add(mesh);
+      this.bombs.push({ mesh, sx: this.playerX, sz: this.playerZ, tx: clamped.x, tz: clamped.z, t: 0, fuse: 3.2, item: true, beepT: 0, radius: 7.2, damage: 280 });
+      synthAudio.playWeaponPickup('rocket', 'equip');
     } else if (id === 'ironSkin') {
       this.ironSkinTimer = 5;
       this.invulnTimer = Math.max(this.invulnTimer, 5);
@@ -11107,12 +11139,8 @@ export class NeonMesaEngine {
       }
       this.hudSyncTimer = 0;
     }
-    // crackle
-    this.beamSoundT -= dt;
-    if (this.beamSoundT <= 0) {
-      this.beamSoundT = 0.13 + Math.random() * 0.06;
-      synthAudio.playShoot('corrente');
-    }
+    // the lightning's roar, looped over its steady stretch while it's live
+    if (!this.chainClip) this.chainClip = synthAudio.playEndingSample('chainLoop', 0.55, true, { quiet: true, offset: 0.3, loopStart: 0.3, loopEnd: 4.1 });
     this.trauma = Math.max(this.trauma, 0.06);
 
     // the bolt itself, re-struck ~25 times a second so it writhes
@@ -11127,6 +11155,10 @@ export class NeonMesaEngine {
   }
 
   private stopChainBeam() {
+    if (this.chainClip) {
+      this.chainClip(0.15);
+      this.chainClip = null;
+    }
     this.beamCharge = 0;
     this.beamTickT = 0;
     if (this.beamMesh) {
@@ -12313,6 +12345,7 @@ export class NeonMesaEngine {
   public switchWeapon(weaponId: WeaponId, force = false) {
     if (!this.ownedWeapons.includes(weaponId)) return;
     // (empty guns can be picked on purpose: firing one just clicks dry)
+    if (weaponId === 'shotgun' && weaponId !== this.activeWeapon) synthAudio.playWeaponPickup('shotgun', 'equip');
     if (weaponId !== this.activeWeapon || force) {
       this.weaponHeatState = { heat: 0, overheated: false, overheatTimer: 0, reloadFlashTimer: 0.14 };
     }
