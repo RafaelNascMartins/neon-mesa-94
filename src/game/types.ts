@@ -28,6 +28,7 @@ export type VmItemId =
   | 'pet'
   | 'charm'
   | 'gunboots'
+  | 'willow'
   // Actives (F key, recharge by dealing damage)
   | 'bomb'
   | 'ironSkin'
@@ -99,7 +100,9 @@ export type WeaponId =
   | 'dinamite'
   | 'macarico'
   | 'disco'
-  | 'corrente';
+  | 'corrente'
+  | 'besta'
+  | 'arco';
 
 /** Close-combat behaviour for melee weapons (ammo is used as durability: one swing = one point). */
 export interface MeleeSpec {
@@ -203,8 +206,10 @@ export interface BarricadeHudInfo {
 }
 
 export interface NearbyWeaponPrompt {
-  kind: WeaponId | 'med';
+  kind: WeaponId | 'med' | 'item';
   weaponId: WeaponId | null;
+  /** kind 'item': the active item lying there (E takes it; yours is left in its place). */
+  item?: VmItemId | null;
   ammo: number;
   requiresSwap: boolean;
   replacingWeaponId: WeaponId | null;
@@ -222,6 +227,10 @@ export interface HudSnapshot {
   treeSubBiome: TreeSubBiome;
   treeCyberRatio: number; // 0 = pure industrial, 0.5 = balanced, 1 = pure cyberpunk
   treeDepth: number;
+  /** '' in a normal room; 'B' / 'C' in a crossing room inside it. */
+  subRoom: string;
+  /** Trigger pulled on an empty gun: the red "ARMA SEM MUNIÇÃO" warning is up. */
+  noAmmo: boolean;
   treePath: TreeBranch[];
   portalOpen: boolean;
   /** VM's door is open: it's the only way onward this floor. */

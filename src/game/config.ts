@@ -258,7 +258,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     keyBind: '[',
     name: 'Revólver Juiz',
     shortName: 'JUIZ',
-    role: 'Clique: um tiro · segure: esvazia o tambor em leque',
+    role: 'Segure: engatilha o tambor · depois, cada clique é um tiro certeiro',
     fireInterval: 0.2,
     projectileSpeed: 48,
     damage: 34,
@@ -378,7 +378,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     keyBind: 'V',
     name: 'Corrente.exe',
     shortName: 'CORRENTE',
-    role: 'Raio que pula de inimigo em inimigo',
+    role: 'Segure: um raio contínuo que liga até 4 inimigos e queima enquanto durar a carga',
     fireInterval: 0.38,
     projectileSpeed: 0,
     damage: 30,
@@ -386,12 +386,52 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     piercing: true,
     spread: 0,
     splashRadius: 0,
-    maxAmmo: 45,
+    maxAmmo: 60,
     heatPerShot: 0.05,
     coolRate: 0.9,
     overheatDuration: 1.2,
     accentColor: '#7fe8ff',
     projectileColor: 0x7fe8ff,
+  },
+  besta: {
+    id: 'besta',
+    keyBind: 'B',
+    name: 'Besta de Ferrolho',
+    shortName: 'BESTA',
+    role: 'Recarga lenta · o virote arremessa o inimigo para trás',
+    fireInterval: 1.15, // cranking the string back
+    projectileSpeed: 58,
+    damage: 95,
+    pellets: 1,
+    piercing: false,
+    spread: 0.004,
+    splashRadius: 0,
+    maxAmmo: 18,
+    heatPerShot: 0,
+    coolRate: 1,
+    overheatDuration: 0.1,
+    accentColor: '#c89a3a',
+    projectileColor: 0xd8c8a0,
+  },
+  arco: {
+    id: 'arco',
+    keyBind: 'N',
+    name: 'Arco de Caça',
+    shortName: 'ARCO',
+    role: 'Segure 1 s para tensionar · solte: flecha que atravessa tudo',
+    fireInterval: 0.3,
+    projectileSpeed: 72,
+    damage: 160,
+    pellets: 1,
+    piercing: true,
+    spread: 0,
+    splashRadius: 0,
+    maxAmmo: 20,
+    heatPerShot: 0,
+    coolRate: 1,
+    overheatDuration: 0.1,
+    accentColor: '#f0ead8',
+    projectileColor: 0xf0ead8,
   },
 };
 
@@ -432,6 +472,7 @@ export const VM_ITEMS: VmItemDef[] = [
   { id: 'pinball', name: 'BALAS PINBALL', desc: 'Depois de acertar, a bala quica pro próximo inimigo até 3 vezes, +10% de dano a cada quique.', price: 300, once: true },
   { id: 'shades', name: 'ÓCULOS ESCUROS', desc: 'Mostra uma barrinha de vida em cima de cada inimigo. Você é tão badass que sabe até quando vai ser a morte deles.', price: 180, once: true },
   { id: 'gunboots', name: 'BOTAS DE ARMA', desc: 'Cada dash dispara 5 balas pra trás. Péssimas pra quadrilha.', price: 220, once: true },
+  { id: 'willow', name: "WILLOW'S DEFENDER", desc: 'Um salgueiro num carrinho, grudado em você. De vez em quando brilha verde e te dá munição.', price: 240, once: true },
   // ── Actives: press F. They recharge as you deal damage.
   { id: 'bomb', name: 'BOMBA', desc: 'ATIVO [F]: arremessa uma bomba onde você mira. Redonda, preta, clássica.', price: 180, once: true, kind: 'active', charge: 900 },
   { id: 'ironSkin', name: 'PELE DE CHUMBO', desc: 'ATIVO [F]: 5s invulnerável e as balas voltam. Não tente nadar.', price: 320, once: true, kind: 'active', charge: 2000 },
@@ -461,6 +502,8 @@ export const WEAPON_ORDER: WeaponId[] = [
   'macarico',
   'disco',
   'corrente',
+  'besta',
+  'arco',
 ];
 export const ARENA_SPAWNABLE_WEAPONS: WeaponId[] = [
   'pistols',
@@ -479,11 +522,13 @@ export const ARENA_SPAWNABLE_WEAPONS: WeaponId[] = [
   'macarico',
   'disco',
   'corrente',
+  'besta',
+  'arco',
 ];
 /** rm -rf turns up only rarely on the arena floor; the Canhão de Faces only drops from Cem Faces. */
 export const RARE_ARENA_WEAPON: WeaponId = 'rmrf';
 export const RARE_ARENA_WEAPON_CHANCE = 0.05;
-export const MANUAL_WEAPONS: ReadonlySet<WeaponId> = new Set(['shotgun', 'railgun', 'rocket', 'hammer', 'harpoon', 'forkbomb', 'coice', 'juiz', 'rmrf', 'dinamite', 'disco']);
+export const MANUAL_WEAPONS: ReadonlySet<WeaponId> = new Set(['shotgun', 'railgun', 'rocket', 'hammer', 'harpoon', 'forkbomb', 'coice', 'juiz', 'rmrf', 'dinamite', 'disco', 'besta']);
 export const BARRICADE_MAX_HP = 720;
 export const BARRICADE_TOTAL_PLANKS = 8;
 

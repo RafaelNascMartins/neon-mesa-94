@@ -216,6 +216,8 @@ test('2-weapon slot limit auto-picks up when holding 1 gun and swaps via E when 
     macarico: 0,
     disco: 0,
     corrente: 0,
+    besta: 0,
+    arco: 0,
   };
 
   // Holding 1 weapon ('pistol') -> shotgun auto-equips into slot 2
@@ -240,12 +242,19 @@ test('2-weapon slot limit auto-picks up when holding 1 gun and swaps via E when 
   assert.equal(swapRes.swappedOut?.weaponId, 'shotgun');
   assert.equal(swapRes.swappedOut?.ammo, 24);
 
-  // If a limited gun hits 0 ammo and no pistol is held, emergency pistol restores
-  const zeroAmmo: Record<WeaponId, number> = { ...startAmmo, railgun: 0 };
+  // An empty gun stays in the inventory while another one can still fire
+  const zeroAmmo: Record<WeaponId, number> = { ...startAmmo, railgun: 0, shotgun: 5 };
+  const keep = ensureUsableWeapon(['shotgun', 'railgun'], 'railgun', zeroAmmo);
+  assert.deepEqual(keep.ownedWeapons, ['shotgun', 'railgun']);
+  assert.equal(keep.activeWeapon, 'shotgun');
+  assert.equal(keep.dropped, null);
+
+  // Nothing can fire: the pistol comes back in the empty gun's slot, which is dropped (not lost)
   const fallback = ensureUsableWeapon(['railgun'], 'railgun', zeroAmmo);
   assert.deepEqual(fallback.ownedWeapons, ['pistol']);
   assert.equal(fallback.activeWeapon, 'pistol');
   assert.equal(fallback.restoredPistol, true);
+  assert.equal(fallback.dropped, 'railgun');
 });
 
 test('normalizeLeaderboardName validates and sanitizes arcade callsigns', () => {

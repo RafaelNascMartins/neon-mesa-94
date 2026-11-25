@@ -44,6 +44,8 @@ export interface RoomLayout {
   hazards: HazardDef[];
   /** How many flying enemies join the round. */
   flyers: number;
+  /** Spots worth putting a reward on (parkour rooms: the far islands). */
+  rewards?: { x: number; z: number }[];
 }
 
 type RoomKind = 'walls' | 'pit' | 'lava' | 'mixed';
@@ -126,20 +128,18 @@ export function makeRoomLayout(wave: number, rand: () => number = Math.random): 
     return i === mid ? (j < mid ? 'pit' : 'lava') : west ? 'pit' : 'lava';
   };
 
-  const hazards: HazardDef[] = [];
-  const isHaz = (i: number, j: number, kind: HazardKind) => i < 0 || j < 0 || i >= N || j >= N || (!walk[i][j] && kindAt(i, j) === kind);
+  // Stepping-stone platforms: some chasm cells next to a walkway keep a square of floor in the
+  // middle (a dash from the walkway, a dash to the next one) — shortcuts across the void
+  const island: boolean[][] = Array.from({ length: N }, () => Array(N).fill(false));
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
-      if (walk[i][j]) continue;
-      const kind = kindAt(i, j);
-      let open = '';
-      if (isHaz(i, j - 1, kind)) open += 'n';
-      if (isHaz(i, j + 1, kind)) open += 's';
-      if (isHaz(i + 1, j, kind)) open += 'e';
-      if (isHaz(i - 1, j, kind)) open += 'w';
-      hazards.push(rect(kind, cellX(i), cellX(j), C / 2, C / 2, open));
+      if (walk[i][j] || kindAt(i, j) !== 'pit' || Math.hypot(cellX(i), cellX(j)) > 24) continue;
+      const nextToWalk = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([di, dj]) => walk[i + di]?.[j + dj]);
+      if (nextToWalk && rand() < 0.45) island[i][j] = true;
     }
   }
+  const hazards: HazardDef[] = [];
+  emitCells(hazards, walk, island, kindAt);
 
   // Dash gaps: cut a band across walkway cells that sit between two hazard cells
   const gapsWanted = meta.kind === 'lava' ? 2 : 3;
@@ -167,6 +167,97 @@ export function makeRoomLayout(wave: number, rand: () => number = Math.random): 
   }
 
   return { name: meta.name, walls: [], hazards, flyers: meta.flyers };
+}
+
+/** Island (stepping stone) side length: the gap between two neighbouring islands is a dash. */
+const ISLAND = 4.4;
+
+/**
+ * Writes the hazard rects for a grid: plain cells as one rect each; island cells as 8 pieces
+ * (4 corners, 4 sides) round a square of floor, so only the edges facing the island get a lip.
+ */
+function emitCells(out: HazardDef[], walk: boolean[][], island: boolean[][], kindAt: (i: number, j: number) => HazardKind) {
+  const isHaz = (i: number, j: number, kind: HazardKind) => i < 0 || j < 0 || i >= N || j >= N || (!walk[i][j] && kindAt(i, j) === kind);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      if (walk[i][j]) continue;
+      const kind = kindAt(i, j);
+      const n = isHaz(i, j - 1, kind);
+      const sOpen = isHaz(i, j + 1, kind);
+      const e = isHaz(i + 1, j, kind);
+      const w = isHaz(i - 1, j, kind);
+      const cx = cellX(i);
+      const cz = cellX(j);
+      if (!island[i][j]) {
+        out.push(rect(kind, cx, cz, C / 2, C / 2, (n ? 'n' : '') + (sOpen ? 's' : '') + (e ? 'e' : '') + (w ? 'w' : '')));
+        continue;
+      }
+      const a = ISLAND / 2; // island half size
+      const b = (C / 2 - a) / 2; // band half thickness
+      const o = a + b; // band centre offset
+      // corners
+      out.push(rect(kind, cx - o, cz - o, b, b, (n ? 'n' : '') + (w ? 'w' : '') + 'es'));
+      out.push(rect(kind, cx + o, cz - o, b, b, (n ? 'n' : '') + (e ? 'e' : '') + 'ws'));
+      out.push(rect(kind, cx - o, cz + o, b, b, (sOpen ? 's' : '') + (w ? 'w' : '') + 'en'));
+      out.push(rect(kind, cx + o, cz + o, b, b, (sOpen ? 's' : '') + (e ? 'e' : '') + 'wn'));
+      // sides (their inner edge faces the island: a lip there)
+      out.push(rect(kind, cx, cz - o, a, b, (n ? 'n' : '') + 'ew'));
+      out.push(rect(kind, cx, cz + o, a, b, (sOpen ? 's' : '') + 'ew'));
+      out.push(rect(kind, cx - o, cz, b, a, (w ? 'w' : '') + 'ns'));
+      out.push(rect(kind, cx + o, cz, b, a, (e ? 'e' : '') + 'ns'));
+    }
+  }
+}
+
+/**
+ * A crossing room (the "B"/"C" rooms): the floor's gone. You land on a ledge at the south,
+ * the way on is a ledge at the north, and between them only stepping stones over the void —
+ * a winding route of dash-sized gaps, a few dead-end islands, one of them holding a reward.
+ */
+export function makeParkourLayout(rand: () => number = Math.random): RoomLayout {
+  const walk: boolean[][] = Array.from({ length: N }, () => Array(N).fill(false));
+  const island: boolean[][] = Array.from({ length: N }, () => Array(N).fill(false));
+  const mid = (N - 1) / 2;
+  // ledges: entry (south row) and exit (north row), three cells wide
+  for (let i = mid - 1; i <= mid + 1; i++) {
+    walk[i][N - 1] = true;
+    walk[i][0] = true;
+  }
+  // the route: north from the entry ledge, drifting sideways, back to the middle for the exit
+  let i = mid - 1 + Math.floor(rand() * 3);
+  const route: [number, number][] = [];
+  for (let j = N - 2; j >= 1; j--) {
+    route.push([i, j]);
+    // a sideways hop now and then (never off the arena)
+    if (j > 1 && rand() < 0.55) {
+      const d = rand() < 0.5 ? -1 : 1;
+      const ni = Math.max(1, Math.min(N - 2, i + d));
+      if (ni !== i) {
+        i = ni;
+        route.push([i, j]);
+      }
+    }
+    // steer back toward the exit ledge for the last rows (a sideways hop, never a diagonal)
+    if (j <= 2 && Math.abs(i - mid) > 1) {
+      i += Math.sign(mid - i);
+      route.push([i, j]);
+    }
+  }
+  for (const [ri, rj] of route) island[ri][rj] = true;
+  // dead ends off the route; the furthest one gets the reward
+  const rewards: { x: number; z: number }[] = [];
+  for (let k = 0; k < 14 && rewards.length < 2; k++) {
+    const [ri, rj] = route[1 + Math.floor(rand() * (route.length - 2))];
+    const d = rand() < 0.5 ? -1 : 1;
+    const ni = ri + d * (1 + Math.floor(rand() * 2));
+    if (ni < 1 || ni > N - 2 || island[ni][rj] || Math.hypot(cellX(ni), cellX(rj)) > 24) continue;
+    island[ni][rj] = true;
+    if (Math.abs(ni - ri) === 2) island[ri + d][rj] = true; // a two-hop spur
+    rewards.push({ x: cellX(ni), z: cellX(rj) });
+  }
+  const hazards: HazardDef[] = [];
+  emitCells(hazards, walk, island, () => 'pit');
+  return { name: 'TRAVESSIA', walls: [], hazards, flyers: rand() < 0.5 ? 1 : 2, rewards };
 }
 
 function rect(kind: HazardKind, x: number, z: number, hw: number, hd: number, open: string): HazardDef {

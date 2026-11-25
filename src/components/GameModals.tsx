@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { SKIN_MAP } from '../game/config';
 import { DEFAULT_OPTIONS, type GameOptions } from '../game/options';
 import type { RunSummary } from '../game/types';
@@ -16,7 +16,6 @@ interface PauseModalProps {
 
 export function PauseModal({ onResume, onRestart, onQuitToTitle, options, onChangeOptions, touchEnabled, onToggleTouch }: PauseModalProps) {
   const [view, setView] = useState<'main' | 'options'>('main');
-  const set = <K extends keyof GameOptions>(key: K, value: GameOptions[K]) => onChangeOptions({ ...options, [key]: value });
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center p-4 px-backdrop">
@@ -51,39 +50,83 @@ export function PauseModal({ onResume, onRestart, onQuitToTitle, options, onChan
             </div>
           </div>
         ) : (
-          <div className="p-6 flex flex-col gap-5">
-            <h2 id="pause-title">
-              <PixelText text="OPÇÕES" size={32} pixel={3} tracking={1} shadows={[{ x: 1, y: 1, color: '#000' }]} />
-            </h2>
-
-            <section className="flex flex-col gap-3">
-              <span className="px-label">Som</span>
-              <OptionSlider label="Volume geral" value={options.masterVolume} onChange={(v) => set('masterVolume', v)} />
-              <OptionSlider label="Música" value={options.musicVolume} onChange={(v) => set('musicVolume', v)} />
-              <OptionSlider label="Efeitos" value={options.sfxVolume} onChange={(v) => set('sfxVolume', v)} />
-            </section>
-
-            <section className="flex flex-col gap-3">
-              <span className="px-label">Tela</span>
-              <OptionToggle label="Tremor de tela" on={options.screenShake} onChange={(v) => set('screenShake', v)} />
-              <OptionSlider label="Estática" value={options.grain} onChange={(v) => set('grain', v)} />
-            </section>
-
-            <section className="flex flex-col gap-3">
-              <span className="px-label">Controles</span>
-              <OptionToggle label="Controles touch" on={touchEnabled} onChange={() => onToggleTouch()} />
-            </section>
-
-            <div className="flex gap-3">
-              <button type="button" onClick={() => onChangeOptions({ ...DEFAULT_OPTIONS })} className="px-btn flex-1">
-                Padrão
-              </button>
-              <button type="button" autoFocus onClick={() => setView('main')} className="px-btn px-btn-primary flex-1">
-                Voltar
-              </button>
-            </div>
-          </div>
+          <OptionsBody
+            options={options}
+            onChangeOptions={onChangeOptions}
+            touchEnabled={touchEnabled}
+            onToggleTouch={onToggleTouch}
+            onBack={() => setView('main')}
+          />
         )}
+      </div>
+    </div>
+  );
+}
+
+interface OptionsBodyProps {
+  options: GameOptions;
+  onChangeOptions: (next: GameOptions) => void;
+  touchEnabled: boolean;
+  onToggleTouch: () => void;
+  onBack: () => void;
+}
+
+/** The options panel (sound, screen, controls) — shared by the pause menu and the main menu. */
+function OptionsBody({ options, onChangeOptions, touchEnabled, onToggleTouch, onBack }: OptionsBodyProps) {
+  const set = <K extends keyof GameOptions>(key: K, value: GameOptions[K]) => onChangeOptions({ ...options, [key]: value });
+  return (
+    <div className="p-6 flex flex-col gap-5">
+      <h2 id="pause-title">
+        <PixelText text="OPÇÕES" size={32} pixel={3} tracking={1} shadows={[{ x: 1, y: 1, color: '#000' }]} />
+      </h2>
+
+      <section className="flex flex-col gap-3">
+        <span className="px-label">Som</span>
+        <OptionSlider label="Volume geral" value={options.masterVolume} onChange={(v) => set('masterVolume', v)} />
+        <OptionSlider label="Música" value={options.musicVolume} onChange={(v) => set('musicVolume', v)} />
+        <OptionSlider label="Efeitos" value={options.sfxVolume} onChange={(v) => set('sfxVolume', v)} />
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <span className="px-label">Tela</span>
+        <OptionToggle label="Tremor de tela" on={options.screenShake} onChange={(v) => set('screenShake', v)} />
+        <OptionSlider label="Estática" value={options.grain} onChange={(v) => set('grain', v)} />
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <span className="px-label">Controles</span>
+        <OptionToggle label="Controles touch" on={touchEnabled} onChange={() => onToggleTouch()} />
+      </section>
+
+      <div className="flex gap-3">
+        <button type="button" onClick={() => onChangeOptions({ ...DEFAULT_OPTIONS })} className="px-btn flex-1">
+          Padrão
+        </button>
+        <button type="button" autoFocus onClick={onBack} className="px-btn px-btn-primary flex-1">
+          Voltar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Main menu → Opções: the same panel in its own window. Esc closes it. */
+export function OptionsModal({ onClose, ...rest }: Omit<OptionsBodyProps, 'onBack'> & { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center p-4 px-backdrop">
+      <div role="dialog" aria-modal="true" aria-labelledby="pause-title" className="px-window w-full max-w-[400px] flex flex-col">
+        <div className="px-titlebar">
+          <span>sys // config</span>
+          <span className="px-blink">■</span>
+        </div>
+        <OptionsBody {...rest} onBack={onClose} />
       </div>
     </div>
   );

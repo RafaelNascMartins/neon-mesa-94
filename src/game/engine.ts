@@ -46,7 +46,7 @@ import { DEFAULT_GRAIN } from './ditherShader';
 import { BossReturnFx } from './bossReturnFx';
 import { TeleportFx } from './teleportFx';
 import { BlastFx } from './blastFx';
-import { applyBrokenExpressions } from './bossFaces';
+import { applyBrokenExpressions, applyFaceExpressions } from './bossFaces';
 import { CoinField, type CoinTier } from './coinDrops';
 import { ACHIEVEMENT_MAP, type AchievementDef, type AchievementId } from './achievements';
 import { savePlayerProgress } from './storage';
@@ -55,6 +55,8 @@ import { HateEndingCutscene, type HateEndingSound } from './hateEnding';
 import { buildHateStage, type HateStage } from './hateStage';
 import { PcRoomScene } from './pcRoom';
 import { HateTreeScene } from './hateTree';
+import { buildGiantTree, DOOR_R, GIANT_TREE_FOOT_R, giantTreeGroundRadius } from './giantTree';
+import { buildCraterVista } from './craterVista';
 import { ProgrammerFight, type ProgrammerSound } from './programmerFight';
 import { hudDisplay } from './programmerBoss';
 import { DeathFx } from './deathFx';
@@ -74,7 +76,7 @@ interface RunStats {
 }
 const freshRunStats = (): RunStats => ({ creditsCollected: 0, bugsCaught: 0 });
 import { itemVoxelGeometry } from './itemSprites';
-import { buildHazardField, buildWall, hazardAt, makeRoomLayout, pushOutOfHazards, ROOM_LAYOUTS, type HazardDef, type HazardField } from './roomHazards';
+import { buildHazardField, buildWall, hazardAt, makeParkourLayout, makeRoomLayout, pushOutOfHazards, ROOM_LAYOUTS, type HazardDef, type HazardField } from './roomHazards';
 import { animateFlyer, buildFlyerModel } from './enemyFlyer';
 import { applyHeroOutfit, outfitAura } from './heroOutfits';
 import { planStaticBatches, runBatchJob, snapshotLeaves, type BatchJob, type BatchSnapshot } from './staticBatch';
@@ -105,6 +107,62 @@ const PIXEL_SCALE = 4;
 
 // Last-kill slow-motion tuning
 const SLOWMO_SCALE = 0.2;
+/** Cem Faces' entrance timeline (s): shot 2 cut, he notices you, the turn, its end, "rebooted" into the line, hold after. */
+const BOSS_INTRO = { shot2: 3.4, notice: 5.3, turnStart: 6.0, step: 0.85, turnEnd: 6.0 + 8 * 0.85, rebootAt: 2.18, hold: 1.6 };
+
+let youAreHereTex: THREE.CanvasTexture | null = null;
+/** The crater shot's marker: a chunky yellow arrow pointing up, "Você está aqui!" under it. */
+function youAreHereTexture() {
+  if (youAreHereTex) return youAreHereTex;
+  // Drawn big (it's shown small, through the dither) so the label stays readable
+  const W = 360;
+  const H = 230;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const g = c.getContext('2d')!;
+  const cx = W / 2;
+  const arrow = (dx: number, dy: number, col: string, grow: number) => {
+    g.fillStyle = col;
+    g.beginPath();
+    g.moveTo(cx + dx, 4 + dy - grow);
+    g.lineTo(cx + 54 + dx + grow, 62 + dy + grow * 0.5);
+    g.lineTo(cx + 22 + dx + grow * 0.5, 62 + dy + grow * 0.5);
+    g.lineTo(cx + 22 + dx + grow * 0.5, 128 + dy + grow);
+    g.lineTo(cx - 22 + dx - grow * 0.5, 128 + dy + grow);
+    g.lineTo(cx - 22 + dx - grow * 0.5, 62 + dy + grow * 0.5);
+    g.lineTo(cx - 54 + dx - grow, 62 + dy + grow * 0.5);
+    g.closePath();
+    g.fill();
+  };
+  arrow(8, 8, '#0a0909', 6); // hard drop shadow
+  arrow(0, 0, '#0a0909', 6); // outline
+  arrow(0, 0, '#ffd23a', 0);
+  g.fillStyle = '#fff6c8';
+  g.fillRect(cx - 6, 26, 12, 86);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
+  youAreHereTex = t;
+  return t;
+}
+
+
+/** Katana combo: when each of the three slashes starts (s). */
+/** Katana: click again within this many seconds and the next slash continues the combo. */
+const KATANA_CHAIN = 0.75;
+/** Corrente.exe: seconds of charge before the held beam strikes. */
+const CHAIN_CHARGE = 0.3;
+/** Arco: seconds of drawing before it can be loosed, and the pressure circle's radius. */
+const BOW_DRAW_TIME = 1;
+/** Cocked Juiz rounds survive this long while you hold another weapon (s). */
+const JUIZ_HOLD_AWAY = 10;
+/** The crater (clearing): z of the Tree's doorway face; its trunk centre sits FOOT_R behind it. */
+const CRATER_TREE_Z = -27.5;
+/** The barricade is nailed across the round doorway itself (it leans back with the trunk). */
+const BARRICADE_Z = -22.1;
+const BOW_PRESSURE_RADIUS = 1.8;
 const SLOWMO_DURATION = 1.1;
 import {
   acquireOrSwapWeapon,
@@ -121,6 +179,7 @@ import {
   isBossEnraged,
   isBossReturnWave,
   isBossWave,
+  BOSS_FIRST_WAVE,
   BOSS_RETURN_WAVE,
   PROGRAMMER_WAVE,
   AERO_FIRST_WAVE,
@@ -248,6 +307,10 @@ interface EnemyEntity {
   // Special ammo status
   burnT?: number;
   burnTick?: number;
+  /** Thrown back (crossbow bolt): velocity bleeding off over flyT seconds. */
+  flyT?: number;
+  flyVX?: number;
+  flyVZ?: number;
   chillT?: number;
   chillStacks?: number;
   frozenT?: number;
@@ -309,9 +372,19 @@ interface MortarHazard {
   whistled?: boolean;
 }
 
+interface MeleeHitOpts {
+  dmgMul?: number;
+  rangeMul?: number;
+  arcDeg?: number;
+  /** The combo moves you itself: no extra lunge into the swing. */
+  noLunge?: boolean;
+}
+
 interface PickupEntity {
   id: number;
-  kind: WeaponId | 'med' | 'ammo';
+  /** 'item': an active item left on the floor (picked back up with E, never by walking over). */
+  kind: WeaponId | 'med' | 'ammo' | 'item';
+  item?: VmItemId;
   ammo: number;
   x: number;
   z: number;
@@ -393,13 +466,18 @@ export class NeonMesaEngine {
   private barrelToggle = 1;
   private overheadReloadGroup = new THREE.Group();
   private reloadArcSegments: THREE.Mesh[] = [];
-  private railTrails: { core: THREE.Mesh; glow: THREE.Mesh; life: number; maxLife: number }[] = [];
+  private railTrails: { core: THREE.Mesh; glow: THREE.Mesh; life: number; maxLife: number; smoke?: boolean }[] = [];
   // New arsenal state
   private coiceShells = 2; // Escopeta Coice: two barrels, then a slow break-open reload
   private juizHold = -1; // seconds the trigger has been held (−1 = not held)
   private juizLoaded = 0; // chambers loaded so far while holding (shown in the drum over your head)
-  private juizBurst = 0; // shots still to fire in the release burst
-  private juizBurstTimer = 0;
+  /** Rounds cocked and waiting: each click fires one (hitscan, heavy, smoke trail). */
+  private juizReady = 0;
+  /** What the next Juiz trigger pull is: a plain tap shot or one of the cocked rounds. */
+  private juizShot: 'plain' | 'judge' = 'plain';
+  private juizTouchWas = false;
+  /** Seconds the cocked rounds have waited while you hold another weapon (they keep 10 s). */
+  private juizAwayT = 0;
   private juizDrum: { sprite: THREE.Sprite; ctx: CanvasRenderingContext2D; tex: THREE.CanvasTexture; shown: number } | null = null;
   private facesSpin = 0; // Canhão de Faces spiral phase
   private rmrfBeams: { mesh: THREE.Group; life: number; maxLife: number }[] = [];
@@ -407,6 +485,11 @@ export class NeonMesaEngine {
   // Weapons & Combat
   private activeWeapon: WeaponId = 'pistol';
   private ownedWeapons: WeaponId[] = ['pistol'];
+  /** The Maçarico's looping roar while its trigger is held (null = silent). */
+  private torchClip: EndingClip | null = null;
+  /** "ARMA SEM MUNIÇÃO" blinking at the bottom (seconds left). */
+  private noAmmoTimer = 0;
+  private torchLastFire = -10;
   private ammo: Record<WeaponId, number> = {
     pistol: Infinity,
     pistols: 0,
@@ -427,6 +510,8 @@ export class NeonMesaEngine {
     macarico: 0,
     disco: 0,
     corrente: 0,
+    besta: 0,
+    arco: 0,
   };
   private fireCooldown = 0;
   private weaponHeatState: WeaponHeatState = {
@@ -480,8 +565,23 @@ export class NeonMesaEngine {
     | 'hate_ending'
     | 'pc_ending'
     | 'hate_tree'
+    | 'crater_vista'
     | 'death' =
     'none';
+  /** The crater's establishing shot: four comic panels, the whole Tree, "Você está aqui!". */
+  private craterVista: THREE.Group | null = null;
+  private craterCine: {
+    t: number;
+    panel: number;
+    fogDensity: number;
+    dom: HTMLDivElement;
+    arrow: THREE.Sprite;
+    label: HTMLDivElement;
+    flash: HTMLDivElement;
+    sky: number;
+    /** Light colours to put back afterwards (the shot swaps in a warm daylight). */
+    lights: [number, number, number, number];
+  } | null = null;
   private cutsceneTimer = 0;
   private cutsceneDuration = 0;
   private cutsceneText: string | null = null;
@@ -558,7 +658,30 @@ export class NeonMesaEngine {
   private meleeTimer = 0;
   private meleeAnimDuration = 0.2;
   private meleeStyle: 'slash' | 'slam' = 'slash';
-  private pendingMelee: { weapon: WeaponId; timer: number } | null = null;
+  private pendingMelee: { weapon: WeaponId; timer: number; opts?: MeleeHitOpts } | null = null;
+  /** Arco: seconds the string has been drawn (−1 = not drawing); ready after 2 s. */
+  private bowCharge = -1;
+  private bowReady = false;
+  private bowRing: THREE.Mesh | null = null;
+  /** Corrente.exe's held beam: charge-up time, damage / drain / sound / redraw timers, the bolt. */
+  private beamCharge = 0;
+  private beamTickT = 0;
+  private beamDrainT = 0;
+  private beamSoundT = 0;
+  private beamRedraw = 0;
+  private beamMesh: THREE.Mesh | null = null;
+  private beamGlow: THREE.Mesh | null = null;
+  private bowRippleGeo: THREE.BufferGeometry | null = null;
+  private bowRipples: { mesh: THREE.Mesh; t: number }[] = [];
+  /** Katana: one click = three slashes, the cowboy carried forward a few metres on his own. */
+  private katanaCombo: { step: number; t: number; dirX: number; dirZ: number; ghost: number } | null = null;
+  /** Combo step of the last slash and when it was thrown (a click within KATANA_CHAIN s continues it). */
+  private katanaStep = -1;
+  private katanaLastSlash = -10;
+  /** Which way the current slash sweeps (the combo alternates). */
+  private meleeSweepDir = 1;
+  /** Live melee smears (anime swing trails). */
+  private smears: { mesh: THREE.Mesh; t: number; life: number; total: number }[] = [];
 
   // Intro cutscene (first run of the session) + the Mustang it leaves parked on the road
   private intro: IntroCutscene | null = null;
@@ -583,6 +706,20 @@ export class NeonMesaEngine {
     shutdown: boolean;
     shutterSound: boolean;
     shutterBang: boolean;
+    /** Intro beats: noticed you, the line started, the head locked on "rebooted". */
+    noticed?: boolean;
+    locked?: boolean;
+    spin?: number;
+    /** Carousel angle (driven here, applied about the head's centre). */
+    spinAngle?: number;
+    headTwitch?: number;
+    /** The lock: when it started, carousel angle from → to, clicks so far, the static blink. */
+    lockT?: number;
+    lockFrom?: number;
+    lockTo?: number;
+    lockClicks?: number;
+    staticT?: number;
+    horror?: boolean;
   } | null = null;
   private vmDoor: VmDoor | null = null; // shutter in the arena wall
   private vmSpace: VmSpace | null = null; // the white void where VM sits (built once)
@@ -594,6 +731,14 @@ export class NeonMesaEngine {
   private boss1Down = false;
   private vmGreeting: VmShopState['greeting'] = 'first';
   private floorsSinceVm = 0;
+  /**
+   * Crossing rooms between combat rooms: 0 = a normal room, 1 = "B", 2 = "C". They sit inside
+   * the room you just cleared (same depth, no wave of their own), so they never eat into the
+   * combat rooms before a boss.
+   */
+  private subRoom = 0;
+  /** Walking into the Tree's doorway: fade to black, cross, fade back in. */
+  private doorFade: { t: number; crossed: boolean } | null = null;
   private bossHusk: EnemyEntity | null = null;
   private vmPrompt = false;
   private whiteFlash = 0; // fade-from-white when crossing into VM's space
@@ -680,9 +825,11 @@ export class NeonMesaEngine {
   private activeCharge = 0;
   private activeMax = 1;
   private ironSkinTimer = 0;
-  private bombs: { mesh: THREE.Group; sx: number; sz: number; tx: number; tz: number; t: number; radius?: number; damage?: number; fuse?: number }[] = [];
+  private bombs: { mesh: THREE.Group; sx: number; sz: number; tx: number; tz: number; t: number; radius?: number; damage?: number; fuse?: number; item?: boolean; beepT?: number }[] = [];
   private bolts: { group: THREE.Group; mat: THREE.MeshBasicMaterial; life: number }[] = [];
   private decreeFx: { mesh: THREE.Mesh; t: number } | null = null;
+  /** Willow's Defender: the willow in its cart, towed at your heel; hands you ammo now and then. */
+  private willow: { mesh: THREE.Group; leaves: THREE.MeshStandardMaterial; x: number; z: number; yaw: number; t: number; glow: number; roll: number } | null = null;
   private pet: {
     mesh: THREE.Group;
     x: number;
@@ -1475,29 +1622,25 @@ export class NeonMesaEngine {
     bargeThruster.rotation.y = -0.32;
     this.clearingDecorGroup.add(bargeBody, bargeThruster);
 
-    // Giant 8-Plank Wooden Barricade sealing the Binary Tree doorway
-    this.treeBarricadeGroup.position.set(0, 0, -18.5);
-    const timberPostMat = new THREE.MeshStandardMaterial({ color: 0x5c361a, roughness: 0.92, metalness: 0.05 });
+    // 8 planks nailed across the Tree's round doorway, each cut to the width of the hole there
+    this.treeBarricadeGroup.position.set(0, 0, BARRICADE_Z);
+    this.treeBarricadeGroup.rotation.x = -0.46;
     const nailMat = new THREE.MeshStandardMaterial({ color: 0x3b4252, metalness: 0.8, roughness: 0.35 });
-    for (const bx of [-5.5, 5.5]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(1.0, 6.8, 1.0), timberPostMat);
-      post.position.set(bx, 3.4, 0);
-      post.castShadow = true;
-      this.treeBarricadeGroup.add(post);
-    }
     for (let p = 0; p < BARRICADE_TOTAL_PLANKS; p++) {
       const plankMat = new THREE.MeshStandardMaterial({
         color: p % 2 === 0 ? 0x9c6631 : 0x7a4920,
         roughness: 0.86,
         metalness: 0.04,
       });
-      const plank = new THREE.Mesh(new THREE.BoxGeometry(11.4, 0.68, 0.52), plankMat);
-      const yPos = 0.72 + p * 0.72;
-      const tilt = (p % 2 === 0 ? 1 : -1) * (0.04 + (p % 3) * 0.018);
-      plank.position.set(0, yPos, (p % 2) * 0.16);
+      const yPos = 0.95 + p * 1.45;
+      const dy = yPos - (DOOR_R - 0.4);
+      const half = Math.sqrt(Math.max(1.5, (DOOR_R + 0.9) ** 2 - dy * dy)) + 0.5; // over the iron rim
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(half * 2, 0.95, 0.42), plankMat);
+      const tilt = (p % 2 === 0 ? 1 : -1) * (0.04 + (p % 3) * 0.02);
+      plank.position.set((p % 3 - 1) * 0.25, yPos, (p % 2) * 0.16);
       plank.rotation.z = tilt;
       plank.castShadow = true;
-      for (const nx of [-5.0, 5.0]) {
+      for (const nx of [-half + 0.45, half - 0.45]) {
         const nail = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.26, 0.62), nailMat);
         nail.position.set(nx, 0, 0);
         plank.add(nail);
@@ -1818,8 +1961,8 @@ export class NeonMesaEngine {
       this.rimLight.intensity = 0.95;
       this.currentRimColorHex = 0xd97706;
       this.giantTreeAnchor.visible = true;
-      this.giantTreeAnchor.position.set(0, 0, -56);
-      this.giantTreeAnchor.scale.setScalar(1.0);
+      this.giantTreeAnchor.position.set(0, 0, -78);
+      this.giantTreeAnchor.scale.setScalar(1);
     } else if (zone === 'cemetery') {
       this.groundMat.color.setHex(0xffffff);
       this.setFloor(this.floors.cemetery);
@@ -1841,8 +1984,8 @@ export class NeonMesaEngine {
       this.rimLight.intensity = 1.15;
       this.currentRimColorHex = 0x1ea89c;
       this.giantTreeAnchor.visible = true;
-      this.giantTreeAnchor.position.set(0, 0, -45);
-      this.giantTreeAnchor.scale.setScalar(1.08);
+      this.giantTreeAnchor.position.set(0, 0, -64);
+      this.giantTreeAnchor.scale.setScalar(1);
     } else if (zone === 'clearing') {
       this.groundMat.color.setHex(0xffffff);
       this.setFloor(this.floors.clearing);
@@ -1864,8 +2007,9 @@ export class NeonMesaEngine {
       this.rimLight.intensity = 1.55;
       this.currentRimColorHex = 0xff4d1a;
       this.giantTreeAnchor.visible = true;
-      this.giantTreeAnchor.position.set(0, 0, -24.2);
-      this.giantTreeAnchor.scale.setScalar(1.28);
+      // at its foot: the doorway right behind the barricade and the portal
+      this.giantTreeAnchor.position.set(0, 0, CRATER_TREE_Z);
+      this.giantTreeAnchor.scale.setScalar(1);
     } else {
       // 'road' (Horizontal Estrada)
       this.groundMat.color.setHex(0xffffff);
@@ -1888,8 +2032,8 @@ export class NeonMesaEngine {
       this.rimLight.intensity = 1.45;
       this.currentRimColorHex = 0xff6b2b;
       this.giantTreeAnchor.visible = true;
-      this.giantTreeAnchor.position.set(0, 0, this.phase === 'title' ? -33.0 : -52.0);
-      this.giantTreeAnchor.scale.setScalar(this.phase === 'title' ? 1.15 : 1.05);
+      this.giantTreeAnchor.position.set(0, 0, this.phase === 'title' ? -48 : -70);
+      this.giantTreeAnchor.scale.setScalar(1);
     }
     const grime = this.scene.getObjectByName('floor_grime');
     if (grime) grime.visible = !(zone === 'tree' && this.aero); // the aero world is spotless
@@ -1910,11 +2054,10 @@ export class NeonMesaEngine {
       this.assets = await loadAllGlbAssets();
       if (this.disposed) return;
 
-      // Mount colossal hollow stump + converging pipe crater .glb monument
-      const treeMonument = cloneModelWithUniqueMaterials(this.assets.treeGiant);
-      this.giantTreeAnchor.add(treeMonument);
-      this.giantTreeAnchor.position.set(0, 0, -33.0);
-      this.giantTreeAnchor.scale.setScalar(1.15);
+      // The Data Tree: colossal, its doorway at the anchor (facing the arena), no end in sight
+      this.giantTreeAnchor.add(buildGiantTree());
+      this.giantTreeAnchor.position.set(0, 0, -48);
+      this.giantTreeAnchor.scale.setScalar(1);
 
       // Populate Stage 1 (Horizontal Estrada) utility poles & road signs flanking Z = ±10.2
       for (const sz of [-10.2, 10.2]) {
@@ -2136,7 +2279,19 @@ export class NeonMesaEngine {
 
     const isWireframe = this.zone === 'tree' && this.treeSubBiome === 'wireframe';
 
-    const obstacleSet = SECTOR_OBSTACLES[this.zone];
+    let obstacleSet = SECTOR_OBSTACLES[this.zone];
+    if (this.zone === 'tree' && !this.aero && !isBossWave(this.wave)) {
+      // The big industrial columns (the ones Cem Faces knocks down) aren't in every room: chasm
+      // rooms and crossings have none — the floor's gone — and the rest get a random handful
+      const kind = ROOM_LAYOUTS[this.wave]?.kind;
+      if (this.subRoom > 0 || kind === 'pit' || kind === 'lava' || kind === 'mixed') {
+        obstacleSet = [];
+      } else {
+        const columns = obstacleSet.filter((o) => o.kind === 'mesa').sort(() => Math.random() - 0.5);
+        const keep = [0, 2, 3, 4, 5][Math.floor(Math.random() * 5)];
+        obstacleSet = [...columns.slice(0, keep), ...obstacleSet.filter((o) => o.kind !== 'mesa')];
+      }
+    }
     for (let idx = 0; idx < obstacleSet.length; idx++) {
       const def = obstacleSet[idx];
       const group = new THREE.Group();
@@ -2183,6 +2338,43 @@ export class NeonMesaEngine {
         group,
       });
     }
+
+    // The crater: the Tree's foot is solid — a chain of blockers hugging the trunk and its
+    // buttresses wherever they reach into the arena (the doorway stays open: it's the way on)
+    if (this.zone === 'clearing') {
+      const cz = CRATER_TREE_Z - GIANT_TREE_FOOT_R;
+      const STEP = 1.2;
+      for (let a = 0.05; a < Math.PI - 0.05; ) {
+        const r = giantTreeGroundRadius(a);
+        const sx = Math.cos(a) * r;
+        const sz = cz + Math.sin(a) * r;
+        a += STEP / r;
+        if (Math.hypot(sx, sz) > ARENA_RADIUS + 1.5) continue;
+        if (Math.abs(sx) < DOOR_R + 0.8 && sz > CRATER_TREE_Z - 1.5) continue; // the doorway
+        const inset = 0.9;
+        this.obstacles.push({
+          id: `tree_foot_${a.toFixed(3)}`,
+          kind: 'stump',
+          x: sx - Math.cos(a - STEP / r) * inset,
+          z: sz - Math.sin(a - STEP / r) * inset,
+          radius: 1.2,
+          halfW: 0.9,
+          halfD: 0.9,
+          destructible: false,
+          explosive: false,
+          hp: Infinity,
+          group: new THREE.Group(),
+        });
+      }
+    }
+  }
+
+  /** Crater only: is (x, z) inside the Tree's trunk / buttresses (grown by `margin`)? */
+  private insideGiantTree(x: number, z: number, margin = 0): boolean {
+    if (this.zone !== 'clearing') return false;
+    const cz = CRATER_TREE_Z - GIANT_TREE_FOOT_R;
+    const dz = z - cz;
+    return Math.hypot(x, dz) < giantTreeGroundRadius(Math.atan2(dz, x)) + margin;
   }
 
   private scheduleNextFrame() {
@@ -2232,6 +2424,32 @@ export class NeonMesaEngine {
       this.updateTitleTour(dt);
     } else if (this.phase === 'playing') {
       this.updatePlaying(dt);
+    }
+    this.updateSmears(dt);
+    if (this.noAmmoTimer > 0) {
+      this.noAmmoTimer = Math.max(0, this.noAmmoTimer - realDt);
+      if (this.noAmmoTimer === 0) this.emitHud();
+    }
+    // The Tree's doorway: black over 0.45 s, cross while it's dark, then fade back in
+    if (this.doorFade) {
+      const f = this.doorFade;
+      f.t += realDt;
+      if (!f.crossed && f.t >= 0.45) {
+        f.crossed = true;
+        this.advanceNorthPortal(null);
+      }
+      const a = f.t < 0.45 ? f.t / 0.45 : f.t < 0.7 ? 1 : Math.max(0, 1 - (f.t - 0.7) / 0.6);
+      this.cineFadeEl.style.background = '#000000';
+      this.cineFadeEl.style.opacity = String(a);
+      if (f.t >= 1.3) {
+        this.doorFade = null;
+        this.cineFadeEl.style.opacity = '0';
+      }
+    }
+    // The Maçarico's roar loops while the flame is going; let go (or pause) and it dies down
+    if (this.torchClip && (this.phase !== 'playing' || this.elapsedSec - this.torchLastFire > 0.14)) {
+      this.torchClip(0.18);
+      this.torchClip = null;
     }
 
     // Update muzzle light, screen damage flash, trauma & particles even during brief hitstop
@@ -2367,6 +2585,12 @@ export class NeonMesaEngine {
     }
     this.keyLight.intensity = this.keyBaseIntensity * f;
     this.hemiLight.intensity = this.hemiBaseIntensity * (0.55 + 0.45 * f);
+    if (this.cutsceneMode === 'crater_vista') {
+      // lit low and red like the Mustang's highway: dark, but the shapes still read
+      this.keyLight.intensity = 2.4;
+      this.hemiLight.intensity = 1.15;
+      this.rimLight.intensity = 2.0;
+    }
     // Sector light pools: dip with the power failures, flicker like fire / tired sodium tubes
     for (let i = 0; i < this.zoneLamps.length; i++) {
       const l = this.zoneLamps[i];
@@ -2490,10 +2714,21 @@ export class NeonMesaEngine {
       const tr = this.railTrails[i];
       tr.life -= dt;
       const ratio = Math.max(0, tr.life / tr.maxLife);
-      tr.core.scale.set(ratio, 1, ratio);
-      tr.glow.scale.set(0.5 + ratio * 0.9, 1, 0.5 + ratio * 0.9);
-      (tr.core.material as THREE.MeshBasicMaterial).opacity = ratio;
-      (tr.glow.material as THREE.MeshBasicMaterial).opacity = ratio * 0.55;
+      if (tr.smoke) {
+        // Gun smoke: the hot core is gone in a blink, the smoke swells and thins out slowly
+        const hot = Math.max(0, 1 - (1 - ratio) * 5);
+        tr.core.scale.set(hot, 1, hot);
+        (tr.core.material as THREE.MeshBasicMaterial).opacity = hot;
+        const spread = 1 + (1 - ratio) * 1.8;
+        tr.glow.scale.set(spread, 1, spread);
+        tr.glow.position.y += dt * 0.35;
+        (tr.glow.material as THREE.MeshBasicMaterial).opacity = ratio * ratio * 0.42;
+      } else {
+        tr.core.scale.set(ratio, 1, ratio);
+        tr.glow.scale.set(0.5 + ratio * 0.9, 1, 0.5 + ratio * 0.9);
+        (tr.core.material as THREE.MeshBasicMaterial).opacity = ratio;
+        (tr.glow.material as THREE.MeshBasicMaterial).opacity = ratio * 0.55;
+      }
       if (tr.life <= 0) {
         this.scene.remove(tr.core);
         this.scene.remove(tr.glow);
@@ -2562,7 +2797,7 @@ export class NeonMesaEngine {
     } else if (this.cutsceneMode === 'gate_open') {
       if (!this.cutsceneClangPlayed) {
         this.cutsceneClangPlayed = true;
-        synthAudio.playGateClang();
+        synthAudio.playGate(); // dragged open
         this.spawnParticles(0, 1.4, -24.5, 24, 0x22e3d4, 9.0, 0.45);
       }
       const liftPhase = Math.min(1, Math.max(0, (progress - 0.12) / 0.75));
@@ -2573,7 +2808,7 @@ export class NeonMesaEngine {
     const targetCamY = this.cutsceneMode === 'barricade_intro' ? 9.8 : 11.2;
     const targetCamZ = this.cutsceneMode === 'barricade_intro' ? -5.0 : -11.5;
     const lookY = this.cutsceneMode === 'barricade_intro' ? 2.8 : 3.6;
-    const lookZ = this.cutsceneMode === 'barricade_intro' ? -18.5 : -24.5;
+    const lookZ = this.cutsceneMode === 'barricade_intro' ? BARRICADE_Z : -24.5;
 
     this.camPosX += (0 - this.camPosX) * damp;
     this.camPosY += (targetCamY - this.camPosY) * damp;
@@ -2706,10 +2941,20 @@ export class NeonMesaEngine {
       }
     }
 
-    // Juiz loading: hammer back, gun tilted and trembling
+    // Arco: the string comes back over the 2 s; fully drawn it trembles with the strain
+    if (this.activeWeapon === 'arco' && this.bowCharge >= 0) {
+      const u = Math.min(1, this.bowCharge / BOW_DRAW_TIME);
+      this.weaponAnchor.position.z -= u * 0.16;
+      this.weaponAnchor.position.y += u * 0.05;
+      if (this.bowReady) this.weaponAnchor.position.x += Math.sin(this.elapsedSec * 47) * 0.012;
+    }
+    // Juiz loading: hammer back, gun tilted and trembling; cocked: held steady, raised
     if (this.activeWeapon === 'juiz' && this.juizLoaded > 1 && this.juizHold >= 0) {
       this.weaponAnchor.rotation.z = -0.45 + Math.sin(this.elapsedSec * 34) * 0.03;
       this.weaponAnchor.position.y = 1.08;
+    } else if (this.activeWeapon === 'juiz' && this.juizReady > 0) {
+      this.weaponAnchor.position.y += 0.06;
+      this.weaponAnchor.rotation.z += -0.12;
     }
 
     // Melee weapons (overrides recoil):
@@ -2720,7 +2965,13 @@ export class NeonMesaEngine {
       const p = 1 - this.meleeTimer / Math.max(0.05, this.meleeAnimDuration);
       const ease = Math.sin(Math.min(1, p) * Math.PI);
       if (this.meleeStyle === 'slash') {
-        const sweep = p < 0.2 ? -1.3 - (p / 0.2) * 0.2 : -1.5 + ((p - 0.2) / 0.8) * 3.0;
+        // anime cut: a short coil back, an almost instant snap across, then a held follow-through
+        const snapEnd = 0.36;
+        let sw: number;
+        if (p < 0.22) sw = -1.25 - Math.sin((p / 0.22) * Math.PI * 0.5) * 0.45;
+        else if (p < snapEnd) sw = -1.7 + (1 - Math.pow(1 - (p - 0.22) / (snapEnd - 0.22), 4)) * 3.55;
+        else sw = 1.85 - ((p - snapEnd) / (1 - snapEnd)) * 0.25;
+        const sweep = sw * this.meleeSweepDir;
         this.weaponAnchor.rotation.set(-0.15 * ease, sweep, 0);
         this.weaponAnchor.position.set(-Math.sin(sweep) * 0.25, 1.05, 0.28 + ease * 0.3);
       } else {
@@ -2800,6 +3051,11 @@ export class NeonMesaEngine {
       this.hateTree?.update(dt);
       return;
     }
+    if (this.cutsceneMode === 'crater_vista') {
+      this.mouseJustPressed = false;
+      this.updateCraterVista(dt);
+      return;
+    }
     if (this.cutsceneMode === 'death') {
       this.mouseJustPressed = false;
       this.deathFx?.update(this.realDt);
@@ -2826,12 +3082,13 @@ export class NeonMesaEngine {
     this.recoilOffset = Math.max(0, this.recoilOffset - dt * 1.4);
 
     // Melee hits land after the weapon's wind-up
+    this.updateKatanaCombo(dt);
     if (this.pendingMelee) {
       this.pendingMelee.timer -= dt;
       if (this.pendingMelee.timer <= 0) {
-        const w = this.pendingMelee.weapon;
+        const { weapon: w, opts } = this.pendingMelee;
         this.pendingMelee = null;
-        this.resolveMeleeHit(w);
+        this.resolveMeleeHit(w, opts);
       }
     }
     this.portalCooldown = Math.max(0, this.portalCooldown - dt);
@@ -2963,15 +3220,16 @@ export class NeonMesaEngine {
         }
       }
     } else if (moveLen > 0.05) {
-      this.playerX += moveX * PLAYER_SPEED * dt;
-      this.playerZ += moveZ * PLAYER_SPEED * dt;
+      const drawSlow = this.bowCharge >= 0 ? 0.55 : 1; // drawing the bow: careful steps
+      this.playerX += moveX * PLAYER_SPEED * drawSlow * dt;
+      this.playerZ += moveZ * PLAYER_SPEED * drawSlow * dt;
       this.walkPhase += moveLen * PLAYER_SPEED * dt * 1.4;
     }
 
     // Extra solid blockers: the clearing's wooden barricade, and the Mustang parked on the road
     const extraBlockers: { x: number; z: number; halfW: number; halfD: number }[] = [];
     if (this.zone === 'clearing' && this.barricadeHp > 0) {
-      extraBlockers.push({ x: 0, z: -18.5, halfW: 6.0, halfD: 0.95 });
+      extraBlockers.push({ x: 0, z: BARRICADE_Z, halfW: DOOR_R + 0.6, halfD: 0.95 });
     }
     if (this.zone === 'road' && this.parkedCar) {
       extraBlockers.push(INTRO_PARKED_CAR);
@@ -3061,13 +3319,18 @@ export class NeonMesaEngine {
     }
 
     // 3. Weapon Firing (Manual trigger for Shotgun / Railgun / Rocket; Hold-to-fire for Pistols & Plasma)
+    if (this.activeWeapon !== 'arco') this.cancelBow();
+    if (this.activeWeapon !== 'corrente') this.stopChainBeam();
     if (this.activeWeapon === 'juiz') {
       this.updateJuizTrigger(dt);
+    } else if (this.activeWeapon === 'arco') {
+      this.juizAway(dt);
+      this.updateBowTrigger(dt);
+    } else if (this.activeWeapon === 'corrente') {
+      this.juizAway(dt);
+      this.updateChainBeam(dt);
     } else {
-      this.juizHold = -1;
-      this.juizBurst = 0;
-      this.juizLoaded = 0;
-      if (this.juizDrum) this.juizDrum.sprite.visible = false;
+      this.juizAway(dt);
       const manualGun = isManualWeapon(this.activeWeapon);
       const wantsFire = manualGun
         ? this.mouseJustPressed || (this.touchFiring && this.fireCooldown <= 0)
@@ -3091,6 +3354,14 @@ export class NeonMesaEngine {
         Math.abs(this.playerX) < 4.5 &&
         this.playerZ < -22.2
       ) {
+        // into the Tree: through a fade to black and back
+        if (this.zone === 'clearing') {
+          if (!this.doorFade) {
+            this.doorFade = { t: 0, crossed: false };
+            synthAudio.playTreeEnter();
+          }
+          return;
+        }
         this.advanceNorthPortal(null);
         return;
       }
@@ -3104,7 +3375,7 @@ export class NeonMesaEngine {
     this.arenaWeaponSpawnTimer -= dt;
     if (this.arenaWeaponSpawnTimer <= 0 && !this.portalOpen) {
       this.arenaWeaponSpawnTimer = 22.0;
-      const activeWeaponPickups = this.pickups.filter((pk) => pk.kind !== 'med' && pk.kind !== 'ammo').length;
+      const activeWeaponPickups = this.pickups.filter((pk) => pk.kind !== 'med' && pk.kind !== 'ammo' && pk.kind !== 'item').length;
       if (activeWeaponPickups < 2) {
         this.spawnArenaWeaponPickup();
       }
@@ -3227,7 +3498,8 @@ export class NeonMesaEngine {
     if (this.weaponHeatState.overheated) return;
     const weapon = WEAPONS[this.activeWeapon];
     if (this.ammo[this.activeWeapon] <= 0) {
-      this.switchWeapon('pistol');
+      // Holding an empty gun (you can switch to one on purpose): a dry click and the warning
+      this.dryFire();
       return;
     }
     // rm -rf is paid for in integrity: it won't run on your last point
@@ -3308,6 +3580,12 @@ export class NeonMesaEngine {
       this.fireRmRf(forwardX, forwardZ);
     } else if (this.activeWeapon === 'dinamite') {
       this.throwDynamite(weapon.damage, weapon.splashRadius);
+    } else if (this.activeWeapon === 'juiz') {
+      // Hitscan: a cocked round hits like a train; a tap shot is an ordinary bullet
+      const judge = this.juizShot === 'judge';
+      this.juizShot = 'plain';
+      this.fireRailgunHitscan(spawnX, spawnZ, forwardX, forwardZ, judge ? 130 : weapon.damage, judge ? 'judge' : 'juizTap');
+      if (judge) this.hitstopTimer = Math.max(this.hitstopTimer, 0.03);
     } else if (this.activeWeapon === 'macarico') {
       this.fireFlame(spawnX, spawnZ, forwardX, forwardZ, weapon.damage);
     } else if (this.activeWeapon === 'corrente') {
@@ -3397,7 +3675,11 @@ export class NeonMesaEngine {
       this.activeWeapon === 'railgun' ? 9.5 : 6.5,
       0.22
     );
-    synthAudio.playShoot(this.activeWeapon);
+    if (this.activeWeapon === 'juiz' && this.juizShot === 'judge') {
+      synthAudio.playEndingSample('judgeShot', 0.9, false, { rate: 0.96 + Math.random() * 0.08, quiet: true });
+    } else {
+      synthAudio.playShoot(this.activeWeapon);
+    }
 
     const prevOverheated = this.weaponHeatState.overheated;
     this.weaponHeatState = stepWeaponHeat(
@@ -3416,49 +3698,208 @@ export class NeonMesaEngine {
       this.pickupBannerTimer = 1.25;
     }
 
-    const fallback = ensureUsableWeapon(this.ownedWeapons, this.activeWeapon, this.ammo);
-    this.ownedWeapons = fallback.ownedWeapons;
-    this.ammo = fallback.ammo;
-    if (fallback.activeWeapon !== this.activeWeapon || fallback.restoredPistol) {
-      this.switchWeapon(fallback.activeWeapon);
-      if (fallback.restoredPistol) {
-        this.pickupBanner = `RESERVA: ${WEAPONS.pistol.shortName}`;
-        this.pickupBannerTimer = 1.8;
-      }
-    }
-    if (weapon.fireInterval >= 0.15 || fallback.activeWeapon !== this.activeWeapon || this.weaponHeatState.overheated !== prevOverheated) {
+    const before = this.activeWeapon;
+    this.applyWeaponFallback();
+    if (weapon.fireInterval >= 0.15 || before !== this.activeWeapon || this.weaponHeatState.overheated !== prevOverheated) {
       this.emitHud();
     }
   }
 
   /**
-   * Revólver Juiz: hold to load the cylinder — a drum over your head fills chamber by chamber —
-   * then let go and every loaded round goes out in a fast straight burst. The rounds ricochet.
-   * A quick click is just one shot.
+   * Out of ammo: the gun stays in the inventory (greyed out, an ammo box revives it) and we move
+   * to one that can still fire. Only when nothing can fire does the pistol come back — the empty
+   * gun is then left on the floor where you stand, never destroyed.
    */
-  private updateJuizTrigger(dt: number) {
-    const held = this.mouseDown || this.touchFiring;
-    const pressed = this.mouseJustPressed || (this.touchFiring && this.juizHold < 0);
-    this.mouseJustPressed = false;
+  /** Trigger pulled on an empty gun: click, and "ARMA SEM MUNIÇÃO" blinks at the bottom. */
+  private dryFire() {
+    this.fireCooldown = 0.3;
+    const was = this.noAmmoTimer > 0;
+    this.noAmmoTimer = 1.4;
+    synthAudio.playCasingTink();
+    if (!was) this.emitHud();
+  }
 
-    // Release burst in progress
-    if (this.juizBurst > 0) {
-      this.juizBurstTimer -= dt;
-      if (this.juizBurstTimer <= 0) {
-        this.juizBurstTimer = 0.055;
-        this.juizBurst -= 1;
-        this.juizLoaded = Math.max(0, this.juizLoaded - 1);
+  private applyWeaponFallback() {
+    // rm -rf is the one thing that's gone once it's spent: it never sits empty in the bag
+    if (this.ownedWeapons.includes('rmrf') && this.ammo.rmrf <= 0) {
+      const rest = this.ownedWeapons.filter((w) => w !== 'rmrf');
+      if (!rest.some((w) => w === 'pistol' || this.ammo[w] > 0)) {
+        if (!rest.includes('pistol')) rest.push('pistol');
+        this.ammo.pistol = Infinity;
+      }
+      this.ownedWeapons = rest;
+      if (this.activeWeapon === 'rmrf') this.activeWeapon = rest.find((w) => w === 'pistol' || this.ammo[w] > 0) ?? 'pistol';
+      this.switchWeapon(this.activeWeapon, true);
+    }
+    const fb = ensureUsableWeapon(this.ownedWeapons, this.activeWeapon, this.ammo);
+    this.ownedWeapons = fb.ownedWeapons;
+    this.ammo = fb.ammo;
+    if (fb.dropped) this.spawnPickup(fb.dropped, this.playerX + 0.8, this.playerZ + 0.8, 28, 0);
+    if (fb.activeWeapon !== this.activeWeapon || fb.restoredPistol) {
+      this.switchWeapon(fb.activeWeapon);
+      if (fb.restoredPistol) {
+        this.pickupBanner = `RESERVA: ${WEAPONS.pistol.shortName}`;
+        this.pickupBannerTimer = 1.8;
+      }
+    }
+  }
+
+  /**
+   * Arco: hold to draw. It has to be held the full 1 s — then the bow is ready: the ground
+   * around you (≈1.8 m) takes the pressure once, dust is shoved outward in a circle and a white ring
+   * marks it. Let go while ready and the arrow flies, piercing everything in line. Let go
+   * early and the string just eases back (no shot).
+   */
+  private updateBowTrigger(dt: number) {
+    const held = this.mouseDown || this.touchFiring;
+    this.mouseJustPressed = false;
+    if (this.bowCharge < 0) {
+      if (held && this.fireCooldown <= 0 && this.ammo.arco <= 0) this.dryFire();
+      if (held && this.fireCooldown <= 0 && this.ammo.arco > 0) {
+        this.bowCharge = 0;
+        this.bowReady = false;
+        synthAudio.playBowDraw();
+      }
+    } else if (held) {
+      this.bowCharge += dt;
+      // The pressure happens once, the moment the draw completes
+      if (!this.bowReady && this.bowCharge >= BOW_DRAW_TIME) {
+        this.bowReady = true;
+        this.bowPressureBurst();
+        synthAudio.playBowReady();
+      }
+    } else {
+      if (this.bowReady) {
         this.weaponHeatState.overheated = false;
         this.firePlayerWeapon();
-        if (this.juizBurst <= 0) {
-          this.juizLoaded = 0;
-          this.fireCooldown = 0.32;
-        }
+        this.fireCooldown = 0.3;
       }
+      this.bowCharge = -1;
+      this.bowReady = false;
+    }
+    this.updateBowFx(dt);
+  }
+
+  private cancelBow() {
+    if (this.bowCharge < 0 && !this.bowReady && !this.bowRing?.visible && this.bowRipples.length === 0) return;
+    this.bowCharge = -1;
+    this.bowReady = false;
+    this.updateBowFx(0.05);
+  }
+
+  /** The moment the bow is ready: the ground around you is pushed out in a ring. */
+  private bowPressureBurst() {
+    const R = BOW_PRESSURE_RADIUS;
+    for (let k = 0; k < 14; k++) {
+      const a = (k / 14) * Math.PI * 2;
+      this.fx.puff(this.playerX + Math.cos(a) * 0.6, 0.2, this.playerZ + Math.sin(a) * 0.6, 0.55, 0xa89c8a, { x: Math.cos(a) * 3.4, z: Math.sin(a) * 3.4 });
+    }
+    this.fx.stampMark(this.playerX, this.playerZ, R * 0.55, 1, Math.random() * Math.PI, 0x2a2420);
+    this.spawnBowRipple();
+    this.trauma = Math.min(1, this.trauma + 0.14);
+    // The pressure nudges anything standing inside the circle back out of it
+    for (const e of this.enemies) {
+      if (e.state === 'ko' || e.archetype === 'boss' || e.husk) continue;
+      const dx = e.x - this.playerX;
+      const dz = e.z - this.playerZ;
+      const d = Math.hypot(dx, dz);
+      if (d > R + e.radius || d < 0.01) continue;
+      e.flyT = 0.25;
+      e.flyVX = (dx / d) * 9;
+      e.flyVZ = (dz / d) * 9;
+    }
+  }
+
+  private spawnBowRipple() {
+    if (!this.bowRippleGeo) this.bowRippleGeo = new THREE.RingGeometry(0.9, 1.0, 48);
+    const m = new THREE.Mesh(
+      this.bowRippleGeo,
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(this.playerX, 0.07, this.playerZ);
+    this.scene.add(m);
+    this.bowRipples.push({ mesh: m, t: 0 });
+  }
+
+  private updateBowFx(dt: number) {
+    if (!this.bowRing) {
+      this.bowRing = new THREE.Mesh(
+        new THREE.RingGeometry(BOW_PRESSURE_RADIUS - 0.14, BOW_PRESSURE_RADIUS, 72),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide, toneMapped: false })
+      );
+      this.bowRing.rotation.x = -Math.PI / 2;
+      this.bowRing.visible = false;
+      this.scene.add(this.bowRing);
+    }
+    const ring = this.bowRing;
+    ring.visible = this.bowReady;
+    if (ring.visible) {
+      ring.position.set(this.playerX, 0.08, this.playerZ);
+      (ring.material as THREE.MeshBasicMaterial).opacity = 0.7 + Math.sin(this.elapsedSec * 9) * 0.2;
+    }
+    // ripples: swell from the hero out to the white ring and fade
+    for (let i = this.bowRipples.length - 1; i >= 0; i--) {
+      const r = this.bowRipples[i];
+      r.t += dt;
+      const u = Math.min(1, r.t / 0.5);
+      r.mesh.scale.setScalar(0.3 + u * (BOW_PRESSURE_RADIUS - 0.3));
+      r.mesh.position.set(this.playerX, 0.07, this.playerZ);
+      (r.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - u) * 0.55;
+      if (u >= 1) {
+        this.scene.remove(r.mesh);
+        (r.mesh.material as THREE.Material).dispose();
+        this.bowRipples.splice(i, 1);
+      }
+    }
+  }
+
+  /** Crossbow bolt: the target is thrown back several metres and left reeling. */
+  private boltKnockback(e: EnemyEntity, vx: number, vz: number) {
+    if (e.archetype === 'boss' || e.state === 'ko' || e.husk) return;
+    const l = Math.hypot(vx, vz) || 1;
+    e.flyT = 0.38;
+    e.flyVX = (vx / l) * 17;
+    e.flyVZ = (vz / l) * 17;
+    e.state = 'cooldown';
+    e.stateTimer = Math.max(e.stateTimer, 0.85);
+    e.hasToken = false;
+    e.vx = 0;
+    e.vz = 0;
+    if (e.telegraphLine) e.telegraphLine.visible = false;
+    this.hitstopTimer = Math.max(this.hitstopTimer, 0.05);
+    this.trauma = Math.min(1, this.trauma + 0.12);
+  }
+
+  /**
+   * Revólver Juiz: hold to cock the cylinder — a drum over your head fills chamber by chamber.
+   * Let go and every cocked round stays ready (judge.mp3 plays): from then on each click fires
+   * ONE of them, as fast or as slow as you like — hitscan, heavy, leaving a smoke trail. A quick
+   * tap without cocking is just one ordinary (still hitscan) shot.
+   */
+  private updateJuizTrigger(dt: number) {
+    this.juizAwayT = 0;
+    const held = this.mouseDown || this.touchFiring;
+    const pressed = this.mouseJustPressed || (this.touchFiring && !this.juizTouchWas);
+    this.juizTouchWas = this.touchFiring;
+    this.mouseJustPressed = false;
+
+    // Rounds ready: one per click
+    if (this.juizReady > 0) {
+      if (pressed && this.fireCooldown <= 0) {
+        this.juizReady -= 1;
+        this.juizLoaded = this.juizReady;
+        this.juizShot = 'judge';
+        this.weaponHeatState.overheated = false;
+        this.firePlayerWeapon();
+        this.fireCooldown = this.juizReady > 0 ? 0.08 : 0.35;
+      }
+      if (this.ammo.juiz <= 0) this.juizReady = 0;
       this.updateJuizDrum();
       return;
     }
 
+    if (pressed && this.juizHold < 0 && this.fireCooldown <= 0 && this.ammo.juiz <= 0) this.dryFire();
     if (pressed && this.juizHold < 0 && this.fireCooldown <= 0 && this.ammo.juiz > 0) {
       this.juizHold = 0;
       this.juizLoaded = 1;
@@ -3474,19 +3915,47 @@ export class NeonMesaEngine {
           if (want === cap) synthAudio.playWeaponPickup('pistol', 'equip'); // full: hammer clicks back
         }
       } else {
-        // Let go: empty what's loaded
         this.juizHold = -1;
-        this.juizBurst = this.juizLoaded;
-        this.juizBurstTimer = 0;
-        if (this.juizBurst > 1) this.trauma = Math.min(1, this.trauma + 0.2);
+        if (this.juizLoaded <= 1) {
+          // Quick tap: a single ordinary shot
+          this.juizShot = 'plain';
+          this.weaponHeatState.overheated = false;
+          this.firePlayerWeapon();
+          this.fireCooldown = 0.24;
+          this.juizLoaded = 0;
+        } else {
+          // Cocked: the rounds wait for you
+          this.juizReady = this.juizLoaded;
+          synthAudio.playEndingSample('judge', 0.95);
+          this.trauma = Math.min(1, this.trauma + 0.12);
+          this.spawnParticles(this.playerX, 1.4, this.playerZ, 14, 0xffd23a, 3.5, 0.5);
+        }
       }
     }
     this.updateJuizDrum();
   }
 
+  /**
+   * Holding another weapon: cocked Juiz rounds stay ready for 10 s (switch back and fire them);
+   * after that they're gone. The drum stays over your head, dimmed, blinking at the end.
+   */
+  private juizAway(dt: number) {
+    this.juizHold = -1;
+    if (this.juizReady > 0) {
+      this.juizAwayT += dt;
+      if (this.juizAwayT >= JUIZ_HOLD_AWAY || !this.ownedWeapons.includes('juiz')) {
+        this.juizReady = 0;
+        this.juizAwayT = 0;
+      }
+    }
+    this.juizLoaded = this.juizReady;
+    this.updateJuizDrum();
+  }
+
   /** The cylinder icon floating over the hero's head (only while loading / bursting). */
   private updateJuizDrum() {
-    const show = this.activeWeapon === 'juiz' && (this.juizHold >= 0 || this.juizBurst > 0) && this.juizLoaded > 0;
+    const away = this.activeWeapon !== 'juiz';
+    const show = away ? this.juizReady > 0 : (this.juizHold >= 0 || this.juizReady > 0) && this.juizLoaded > 0;
     if (!this.juizDrum) {
       const c = document.createElement('canvas');
       c.width = c.height = 64;
@@ -3495,7 +3964,7 @@ export class NeonMesaEngine {
       tex.minFilter = THREE.NearestFilter;
       tex.colorSpace = THREE.SRGBColorSpace;
       const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
-      sprite.scale.set(2.1, 2.1, 1);
+      sprite.scale.set(1.45, 1.45, 1);
       sprite.renderOrder = 30;
       this.scene.add(sprite);
       this.juizDrum = { sprite, ctx: c.getContext('2d')!, tex, shown: -1 };
@@ -3506,9 +3975,13 @@ export class NeonMesaEngine {
       d.shown = -1;
       return;
     }
-    d.sprite.position.set(this.playerX, 3.9, this.playerZ);
-    if (d.shown !== this.juizLoaded) {
-      d.shown = this.juizLoaded;
+    d.sprite.position.set(this.playerX, 3.5, this.playerZ);
+    // away: dimmed, and blinking through its last 3 seconds
+    const left = JUIZ_HOLD_AWAY - this.juizAwayT;
+    (d.sprite.material as THREE.SpriteMaterial).opacity = !away ? 1 : left < 3 && Math.sin(this.elapsedSec * 14) > 0 ? 0.2 : 0.6;
+    const key = this.juizLoaded + (this.juizReady > 0 ? 100 : 0);
+    if (d.shown !== key) {
+      d.shown = key;
       const ctx = d.ctx;
       ctx.clearRect(0, 0, 64, 64);
       // Drum body: black outline, gunmetal disc, brass rim
@@ -3516,6 +3989,13 @@ export class NeonMesaEngine {
       ctx.beginPath();
       ctx.arc(32, 32, 30, 0, Math.PI * 2);
       ctx.fill();
+      if (this.juizReady > 0) {
+        // Ready: the drum gets a hot red rim
+        ctx.fillStyle = '#ff2a1f';
+        ctx.beginPath();
+        ctx.arc(32, 32, 29, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.fillStyle = '#c8ccd4';
       ctx.beginPath();
       ctx.arc(32, 32, 27, 0, Math.PI * 2);
@@ -3554,7 +4034,7 @@ export class NeonMesaEngine {
       d.tex.needsUpdate = true;
     }
     // A little pop each time a chamber clicks in
-    d.sprite.scale.setScalar(2.1 + (this.juizHold >= 0 ? Math.max(0, 0.17 - (this.juizHold % 0.17)) * 1.2 : 0));
+    d.sprite.scale.setScalar(1.45 + (this.juizHold >= 0 ? Math.max(0, 0.17 - (this.juizHold % 0.17)) * 0.9 : 0));
   }
   /**
    * rm -rf: deletes everything in a screen-wide lane — enemies, their bullets, props.
@@ -3646,20 +4126,25 @@ export class NeonMesaEngine {
     }
   }
 
-  private fireRailgunHitscan(sx: number, sz: number, dirX: number, dirZ: number, damage: number) {
+  /**
+   * Hitscan ray. 'rail' pierces everything (white beam); the Juiz's rounds ('judge' / 'juizTap')
+   * stop at the first body and leave a trail of gun smoke hanging in the air.
+   */
+  private fireRailgunHitscan(sx: number, sz: number, dirX: number, dirZ: number, damage: number, style: 'rail' | 'judge' | 'juizTap' = 'rail') {
+    const isJuiz = style !== 'rail';
     // Intersect ray with circular arena rim (|origin + t*dir|^2 = ARENA_RADIUS^2)
     const b = sx * dirX + sz * dirZ;
     const c = sx * sx + sz * sz - ARENA_RADIUS * ARENA_RADIUS;
     const disc = Math.max(0, b * b - c);
     let maxDist = Math.max(2, -b + Math.sqrt(disc));
 
-    // Check Wooden Barricade in Clearing Stage (z = -18.5, |x| <= 5.9)
+    // Check Wooden Barricade in Clearing Stage (across the doorway at BARRICADE_Z)
     let hitBarricade = false;
     if (this.zone === 'clearing' && this.barricadeHp > 0 && Math.abs(dirZ) > 0.001) {
-      const tBar = (-18.5 - sz) / dirZ;
+      const tBar = (BARRICADE_Z - sz) / dirZ;
       if (tBar > 0 && tBar < maxDist) {
         const hitX = sx + dirX * tBar;
-        if (Math.abs(hitX) <= 5.9) {
+        if (Math.abs(hitX) <= DOOR_R + 0.6) {
           maxDist = tBar;
           hitBarricade = true;
         }
@@ -3723,6 +4208,24 @@ export class NeonMesaEngine {
       }
     }
     targets.sort((a, b) => a.t - b.t);
+    if (isJuiz) {
+      // One body per round: the ray ends where it lands
+      const first = targets[0];
+      let ex = endX;
+      let ez = endZ;
+      if (first) {
+        ex = sx + dirX * first.t;
+        ez = sz + dirZ * first.t;
+        this.damageEnemy(first.e, damage, dirX, dirZ);
+        this.spawnParticles(first.e.x, 1.25, first.e.z, style === 'judge' ? 18 : 8, 0xffd23a, 10, 0.3);
+        this.spawnParticles(first.e.x, 1.15, first.e.z, style === 'judge' ? 12 : 5, 0xff2a1f, 8, 0.28);
+        if (style === 'judge') this.trauma = Math.min(1, this.trauma + 0.16);
+      } else {
+        this.spawnParticles(endX, 1.15, endZ, 8, 0xffd23a, 6, 0.22);
+      }
+      this.spawnJuizSmoke(sx, sz, ex, ez, style === 'judge');
+      return;
+    }
     for (const item of targets) {
       this.damageEnemy(item.e, damage, dirX, dirZ);
       this.spawnParticles(item.e.x, 1.25, item.e.z, 16, 0xffffff, 11, 0.28);
@@ -3739,7 +4242,33 @@ export class NeonMesaEngine {
     this.spawnRailTrail(sx, 1.18, sz, endX, 1.18, endZ);
   }
 
-  private spawnRailTrail(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) {
+  /** Juiz round: a hot thin streak that fades fast, inside a grey smoke trail that lingers and spreads. */
+  private spawnJuizSmoke(sx: number, sz: number, ex: number, ez: number, heavy: boolean) {
+    this.spawnRailTrail(sx, 1.18, sz, ex, 1.18, ez, {
+      core: 0xfff0c0,
+      glow: 0x9a948c,
+      coreR: heavy ? 0.07 : 0.045,
+      glowR: heavy ? 0.34 : 0.2,
+      life: heavy ? 1.3 : 0.7,
+      glowOpacity: 0.42,
+    });
+    const len = Math.hypot(ex - sx, ez - sz);
+    const step = heavy ? 0.9 : 1.6;
+    for (let t = 0.6; t < len; t += step) {
+      const k = t / len;
+      this.spawnParticles(sx + (ex - sx) * k, 1.18, sz + (ez - sz) * k, 1, Math.random() < 0.5 ? 0x8a8580 : 0xb0aaa2, 0.7, heavy ? 1.1 : 0.6);
+    }
+  }
+
+  private spawnRailTrail(
+    x1: number,
+    y1: number,
+    z1: number,
+    x2: number,
+    y2: number,
+    z2: number,
+    o: { core?: number; glow?: number; coreR?: number; glowR?: number; life?: number; glowOpacity?: number } = {}
+  ) {
     _vec3A.set(x1, y1, z1);
     _vec3B.set(x2, y2, z2);
     const len = Math.max(0.2, _vec3A.distanceTo(_vec3B));
@@ -3747,9 +4276,9 @@ export class NeonMesaEngine {
     const dir = _vec3B.clone().sub(_vec3A).normalize();
     const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
 
-    const coreGeo = new THREE.CylinderGeometry(0.11, 0.11, len, 6);
+    const coreGeo = new THREE.CylinderGeometry(o.coreR ?? 0.11, o.coreR ?? 0.11, len, 6);
     const coreMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
+      color: o.core ?? 0xffffff,
       transparent: true,
       opacity: 1,
       depthWrite: false,
@@ -3758,11 +4287,11 @@ export class NeonMesaEngine {
     core.position.copy(mid);
     core.quaternion.copy(quat);
 
-    const glowGeo = new THREE.CylinderGeometry(0.28, 0.28, len, 6);
+    const glowGeo = new THREE.CylinderGeometry(o.glowR ?? 0.28, o.glowR ?? 0.28, len, 6);
     const glowMat = new THREE.MeshBasicMaterial({
-      color: 0xe0f2fe,
+      color: o.glow ?? 0xe0f2fe,
       transparent: true,
-      opacity: 0.58,
+      opacity: o.glowOpacity ?? 0.58,
       depthWrite: false,
     });
     const glow = new THREE.Mesh(glowGeo, glowMat);
@@ -3770,7 +4299,8 @@ export class NeonMesaEngine {
     glow.quaternion.copy(quat);
 
     this.scene.add(glow, core);
-    this.railTrails.push({ core, glow, life: 0.32, maxLife: 0.32 });
+    const life = o.life ?? 0.32;
+    this.railTrails.push({ core, glow, life, maxLife: life, smoke: o.glow !== undefined });
   }
 
   private spawnProjectile(
@@ -3909,6 +4439,12 @@ export class NeonMesaEngine {
         slot.coreMesh.geometry = this.projectileGeo;
         slot.coreMesh.rotation.set(0, 0, 0);
         slot.coreMesh.scale.set(0.3, 0.3, 1.5);
+      } else if (weapon === 'besta' || weapon === 'arco') {
+        // Bolt: short and thick; arrow: long and thin
+        slot.coreMesh.geometry = this.projectileGeo;
+        slot.coreMesh.rotation.set(0, 0, 0);
+        if (weapon === 'besta') slot.coreMesh.scale.set(0.42, 0.42, 2.0);
+        else slot.coreMesh.scale.set(0.26, 0.26, 3.0);
       } else if (weapon === 'harpoon') {
         // Long barbed spear
         slot.coreMesh.geometry = this.rocketGeo;
@@ -4118,6 +4654,14 @@ export class NeonMesaEngine {
       this.beginRewrite(branch);
       return;
     }
+    // Between the combat rooms before his second coming, now and then the way on is a
+    // crossing over the void first ("4B", sometimes a "4C" after it)
+    const canCross = this.zone === 'tree' && !this.aero && this.wave >= BOSS_FIRST_WAVE + 1 && this.wave < BOSS_RETURN_WAVE && !this.vmDoor;
+    if (canCross && this.subRoom < 2 && Math.random() < (this.subRoom === 0 ? 0.3 : 0.25)) {
+      this.enterCrossingRoom();
+      return;
+    }
+    this.subRoom = 0;
     synthAudio.playTreeEnter();
     this.portalOpen = false;
     this.portalCooldown = 1.1;
@@ -4174,8 +4718,9 @@ export class NeonMesaEngine {
       this.playerZ = 0;
       this.playerYaw = Math.PI / 2;
     } else if (targetZone === 'clearing') {
+      // the crater: you come in at the far end, the Tree in front of you
       this.playerX = 0;
-      this.playerZ = -3.5;
+      this.playerZ = 23;
       this.playerYaw = Math.PI;
     } else {
       this.playerX = 0;
@@ -4200,6 +4745,77 @@ export class NeonMesaEngine {
     this.emitHud();
   }
 
+  /** Through the stairs into a crossing room (see `subRoom`): same depth, the floor's gone. */
+  private enterCrossingRoom() {
+    synthAudio.playTreeEnter();
+    this.subRoom += 1;
+    this.portalOpen = false;
+    this.portalCooldown = 1.1;
+    this.coins.collectAll((_t, v) => this.addCredits(v));
+    this.fx.clear();
+    this.returnFx.reset();
+    this.teleportFx.reset();
+    this.blastFx.reset();
+    this.clearPinnedCorpses();
+    this.poisonClouds.clear();
+    this.poison = 0;
+    this.cancelSlowMo();
+    for (const p of this.projectiles) {
+      p.active = false;
+      p.group.visible = false;
+    }
+    while (this.mortars.length > 0) {
+      const m = this.mortars.pop()!;
+      this.scene.remove(m.ringMesh);
+      this.scene.remove(m.shellMesh);
+    }
+    while (this.pickups.length > 0) this.removePickupAt(0);
+    this.nearbyWeaponPrompt = null;
+    // whatever was still flying about the last room stays there
+    for (let i = this.enemies.length - 1; i >= 0; i--) if (!this.enemies[i].husk) this.removeEnemyAt(i);
+    this.flyersPending = 0;
+    // land on the south ledge
+    this.playerX = 0;
+    this.playerZ = 25;
+    this.playerYaw = Math.PI;
+    this.invulnTimer = 0.9;
+    this.heroRoot.position.set(this.playerX, 0, this.playerZ);
+    this.heroRoot.rotation.y = this.playerYaw;
+    this.heroShadow.position.set(this.playerX, 0.02, this.playerZ);
+    this.applyZoneVisuals('tree'); // rebuilds the (empty) obstacles for a crossing
+    this.waveQueue = [];
+    this.hexerPending = false;
+    this.setupCrossingLayout();
+    this.camPosX = this.playerX;
+    this.camPosY = 20.5;
+    this.camPosZ = this.playerZ + 14.5;
+    this.updateCameraFollow(1);
+    this.emitHud();
+  }
+
+  private setupCrossingLayout() {
+    this.clearRoomLayout();
+    const layout = makeParkourLayout();
+    this.hazardField = buildHazardField(layout.hazards);
+    this.scene.add(this.hazardField.group);
+    this.hazardDefs.push(...layout.hazards);
+    // a couple of things circling over the void; the way on is open from the start
+    this.flyersPending = layout.flyers;
+    this.portalOpen = true;
+    synthAudio.playPortalOpen();
+    // the far island holds something worth the detour
+    const r = layout.rewards?.[0];
+    if (r) this.spawnPickup(Math.random() < 0.5 ? 'med' : 'ammo', r.x, r.z, Infinity);
+    this.safeX = this.playerX;
+    this.safeZ = this.playerZ;
+    this.waveBanner = `PROFUNDIDADE ${this.treeDepth}${this.subRoomLetter()} · TRAVESSIA · ATRAVESSE PELAS PLATAFORMAS`;
+    this.waveBannerTimer = 3.4;
+  }
+
+  private subRoomLetter() {
+    return this.subRoom === 1 ? 'B' : this.subRoom === 2 ? 'C' : '';
+  }
+
   private configureStageEntry(targetZone: ArenaZone, triggerCutscenes: boolean) {
     this.stormActive = false;
     this.rainInstanced.visible = false;
@@ -4210,6 +4826,7 @@ export class NeonMesaEngine {
       if (triggerCutscenes) {
         this.desertGateBars.position.y = 5.8;
         this.cutsceneMode = 'gate_close';
+        synthAudio.playGate(); // the bars grinding down
         this.cutsceneTimer = 0;
         this.cutsceneDuration = 2.1;
         this.cutsceneClangPlayed = false;
@@ -4228,13 +4845,7 @@ export class NeonMesaEngine {
       for (const plank of this.barricadePlanks) {
         plank.visible = true;
       }
-      if (triggerCutscenes) {
-        this.cutsceneMode = 'barricade_intro';
-        this.cutsceneTimer = 0;
-        this.cutsceneDuration = 1.95;
-        this.cutsceneClangPlayed = false;
-        this.cutsceneText = 'ENTRADA TRANCADA · ATIRE PARA QUEBRAR AS 8 TÁBUAS';
-      }
+      if (triggerCutscenes) this.startCraterVista();
     } else {
       this.treeBarricadeGroup.visible = false;
     }
@@ -4365,6 +4976,8 @@ export class NeonMesaEngine {
         const angle = Math.random() * Math.PI * 2;
         x = opts.x ?? Math.cos(angle) * spawnDist;
         z = opts.z ?? Math.sin(angle) * spawnDist;
+        // never inside the Tree's trunk in the crater
+        if (opts.x === undefined && this.insideGiantTree(x, z, 2.2)) continue;
         if (opts.flying || !hazardAt(x, z, this.hazardDefs, -1.2)) break;
       }
       // Hazard rooms leave little floor near the wall: fall back to the walkway spine
@@ -5759,11 +6372,11 @@ export class NeonMesaEngine {
         p.fromPlayer &&
         this.zone === 'clearing' &&
         this.barricadeHp > 0 &&
-        Math.abs(p.x) <= 5.9 &&
-        ((prevZ >= -19.5 && p.z <= -17.5) || (prevZ <= -17.5 && p.z >= -19.5) || (p.z <= -17.5 && p.z >= -19.5))
+        Math.abs(p.x) <= DOOR_R + 0.6 &&
+        ((prevZ >= BARRICADE_Z - 1 && p.z <= BARRICADE_Z + 1) || (prevZ <= BARRICADE_Z + 1 && p.z >= BARRICADE_Z - 1) || (p.z <= BARRICADE_Z + 1 && p.z >= BARRICADE_Z - 1))
       ) {
         hit = true;
-        this.damageBarricade(p.damage, p.x, p.y, -18.3);
+        this.damageBarricade(p.damage, p.x, p.y, BARRICADE_Z + 0.2);
       }
 
       // Check obstacle collisions (ghost rounds drift straight through)
@@ -5816,6 +6429,7 @@ export class NeonMesaEngine {
               }
               hit = true;
               if (p.weapon === 'harpoon') this.harpoonHit(e);
+              if (p.weapon === 'besta') this.boltKnockback(e, p.vx, p.vz);
               this.hitSource = null;
               break;
             }
@@ -5884,8 +6498,8 @@ export class NeonMesaEngine {
       this.score += 750;
       synthAudio.playExplosion();
       synthAudio.playPortalOpen();
-      this.spawnParticles(0, 2.2, -18.5, 46, 0x8b5a2b, 14, 0.65);
-      this.spawnParticles(0, 2.5, -18.5, 24, 0xe6ccb2, 12, 0.55);
+      this.spawnParticles(0, 2.2, BARRICADE_Z, 46, 0x8b5a2b, 14, 0.65);
+      this.spawnParticles(0, 2.5, BARRICADE_Z, 24, 0xe6ccb2, 12, 0.55);
       this.waveBanner = 'BARRICADA DESTRUÍDA ↑ ENTRE NA ÁRVORE BINÁRIA';
       this.waveBannerTimer = 4.5;
     }
@@ -6102,6 +6716,26 @@ export class NeonMesaEngine {
     if (this.harpoonRope) this.harpoonRope.visible = false;
   }
 
+  /**
+   * The bomb item's blast, made to look as big as it hits: a fireball and a shockwave racing
+   * out to the edge of its reach, a white flash, a fan of sparks, chunks and a column of smoke,
+   * and a scorch the size of the blast.
+   */
+  private bigBlastFx(x: number, z: number, radius: number) {
+    this.blastFx.spawn(x, z, radius);
+    this.fireFlash = Math.max(this.fireFlash, 0.5);
+    this.spawnParticles(x, 1.0, z, 40, 0xffe08a, 16, 0.5);
+    this.spawnParticles(x, 1.2, z, 30, 0xff3a12, 13, 0.6);
+    this.spawnParticles(x, 0.5, z, 18, 0x3a2a22, 9, 0.7);
+    for (let k = 0; k < 16; k++) {
+      const a = (k / 16) * Math.PI * 2;
+      this.fx.puff(x + Math.cos(a) * radius * 0.5, 0.4, z + Math.sin(a) * radius * 0.5, 1.4, 0x3a3230, { x: Math.cos(a) * 4, z: Math.sin(a) * 4 });
+    }
+    for (let k = 0; k < 6; k++) this.fx.puff(x + (Math.random() - 0.5), 1.5 + k * 0.8, z + (Math.random() - 0.5), 1.6 + k * 0.3, 0x2a2422, { x: 0, z: 0 });
+    this.fx.stampMark(x, z, radius * 0.75, 1, Math.random() * Math.PI, 0x0e0a08);
+    this.trauma = Math.min(1, this.trauma + 0.3);
+  }
+
   private triggerExplosion(x: number, z: number, radius: number, damage: number, small = false) {
     if (small) {
       // fork() process terminating: a tight green-and-orange pop (there are up to 8 at once)
@@ -6115,7 +6749,7 @@ export class NeonMesaEngine {
         const d = Math.hypot(e.x - x, e.z - z);
         if (d <= radius + e.radius * 0.5) this.damageEnemy(e, Math.round(damage * (1 - (d / (radius + 1)) * 0.4)), e.x - x, e.z - z);
       }
-      if (this.zone === 'clearing' && this.barricadeHp > 0 && Math.hypot(0 - x, -18.5 - z) <= radius + 4.8) {
+      if (this.zone === 'clearing' && this.barricadeHp > 0 && Math.hypot(0 - x, BARRICADE_Z - z) <= radius + 4.8) {
         this.damageBarricade(damage * 0.5, x, 1.4, z);
       }
       return;
@@ -6135,7 +6769,7 @@ export class NeonMesaEngine {
     this.camPosZ += (dz / dLen) * impactShake.cameraKick * 0.75;
     synthAudio.playExplosion();
 
-    if (this.zone === 'clearing' && this.barricadeHp > 0 && Math.hypot(0 - x, -18.5 - z) <= radius + 4.8) {
+    if (this.zone === 'clearing' && this.barricadeHp > 0 && Math.hypot(0 - x, BARRICADE_Z - z) <= radius + 4.8) {
       this.damageBarricade(damage, x, 1.4, z);
     }
 
@@ -6422,6 +7056,39 @@ export class NeonMesaEngine {
     this.spawnPickup(weaponId, 0, -4.5, 28);
   }
 
+  /** An active item on the floor: a slowly spinning voxel sprite over a gold ring. */
+  private spawnItemPickup(item: VmItemId, px: number, pz: number) {
+    // a step away from where you stand, clear of walls and pits
+    let x = px;
+    let z = pz;
+    for (let k = 0; k < 8; k++) {
+      const a = (k / 8) * Math.PI * 2 + Math.random() * 0.4;
+      const cx = px + Math.cos(a) * 1.9;
+      const cz = pz + Math.sin(a) * 1.9;
+      if (Math.hypot(cx, cz) > ARENA_RADIUS - 2) continue;
+      if (this.obstacles.some((o) => Math.hypot(o.x - cx, o.z - cz) < o.radius + 0.9) || hazardAt(cx, cz, this.hazardDefs, -0.8)) continue;
+      x = cx;
+      z = cz;
+      break;
+    }
+    const g = new THREE.Group();
+    const ring = new THREE.Mesh(
+      this.ringGeo,
+      new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.06;
+    ring.scale.setScalar(0.95);
+    const sprite = new THREE.Mesh(itemVoxelGeometry(item), new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }));
+    sprite.position.y = 0.95;
+    sprite.scale.setScalar(1.1);
+    g.add(ring, sprite);
+    g.position.set(x, 0, z);
+    this.scene.add(g);
+    this.spawnParticles(x, 0.9, z, 10, 0xffd27a, 4, 0.3);
+    this.pickups.push({ id: this.nextEntityId++, kind: 'item', item, ammo: 0, x, z, life: Infinity, mesh: g });
+  }
+
   private spawnPickup(kind: WeaponId | 'med' | 'ammo', x: number, z: number, life = 18, ammo?: number) {
     const color = kind === 'med' ? 0x55ff55 : kind === 'ammo' ? 0xffc24a : WEAPONS[kind].projectileColor;
     const g = new THREE.Group();
@@ -6501,7 +7168,16 @@ export class NeonMesaEngine {
 
       if (isNear && dist < closestDist && pk.kind !== 'ammo') {
         closestDist = dist;
-        if (pk.kind === 'med') {
+        if (pk.kind === 'item') {
+          closestSwapPrompt = {
+            kind: 'item',
+            weaponId: null,
+            item: pk.item ?? null,
+            ammo: 0,
+            requiresSwap: true,
+            replacingWeaponId: null,
+          };
+        } else if (pk.kind === 'med') {
           closestSwapPrompt = {
             kind: 'med',
             weaponId: null,
@@ -6528,7 +7204,7 @@ export class NeonMesaEngine {
         }
       }
 
-      if (dist < PLAYER_RADIUS + 1.0) {
+      if (dist < PLAYER_RADIUS + 1.0 && pk.kind !== 'item') {
         if (pk.kind === 'med') {
           this.playerHp = Math.min(this.playerMaxHp, this.playerHp + 1);
           this.spawnParticles(pk.x, 0.8, pk.z, 10, 0x55ff55, 6, 0.25);
@@ -6583,10 +7259,10 @@ export class NeonMesaEngine {
     }
 
     const prevKey = this.nearbyWeaponPrompt
-      ? `${this.nearbyWeaponPrompt.kind}:${this.nearbyWeaponPrompt.requiresSwap}:${this.nearbyWeaponPrompt.replacingWeaponId ?? ''}`
+      ? `${this.nearbyWeaponPrompt.kind}:${this.nearbyWeaponPrompt.item ?? ''}:${this.nearbyWeaponPrompt.requiresSwap}:${this.nearbyWeaponPrompt.replacingWeaponId ?? ''}`
       : '';
     const nextKey = closestSwapPrompt
-      ? `${closestSwapPrompt.kind}:${closestSwapPrompt.requiresSwap}:${closestSwapPrompt.replacingWeaponId ?? ''}`
+      ? `${closestSwapPrompt.kind}:${closestSwapPrompt.item ?? ''}:${closestSwapPrompt.requiresSwap}:${closestSwapPrompt.replacingWeaponId ?? ''}`
       : '';
     this.nearbyWeaponPrompt = closestSwapPrompt;
     if (prevKey !== nextKey) {
@@ -6611,6 +7287,21 @@ export class NeonMesaEngine {
 
     const pk = this.pickups[bestIdx];
     if (pk.kind === 'med' || pk.kind === 'ammo') return;
+    if (pk.kind === 'item') {
+      // Take the active item back; whatever you were carrying goes down in its place
+      const item = pk.item!;
+      const { x, z } = pk;
+      this.removePickupAt(bestIdx);
+      this.installItem(item);
+      const def = VM_ITEMS.find((i) => i.id === item);
+      this.pickupBanner = `ATIVO: ${def?.name ?? item}`;
+      this.pickupBannerTimer = 2.0;
+      this.spawnParticles(x, 1.0, z, 14, 0xffd27a, 6, 0.3);
+      synthAudio.playWeaponPickup('plasma', 'equip');
+      this.nearbyWeaponPrompt = null;
+      this.emitHud();
+      return;
+    }
 
     const res = acquireOrSwapWeapon(
       this.ownedWeapons,
@@ -6692,6 +7383,21 @@ export class NeonMesaEngine {
         mat.emissive.setHex(mat.userData.baseEmissive);
         mat.emissiveIntensity = mat.userData.baseEmissiveIntensity;
       }
+    });
+  }
+
+  /** Burning: emissive pushed to a flickering red-hot glow (restored by setGroupEmissiveFlash(false)). */
+  private setGroupBurnGlow(group: THREE.Group, k: number) {
+    group.traverse((obj) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+      if (!mat || !mat.emissive) return;
+      if (mat.userData.baseEmissive === undefined) {
+        mat.userData.baseEmissive = mat.emissive.getHex();
+        mat.userData.baseEmissiveIntensity = mat.emissiveIntensity;
+      }
+      mat.emissive.setRGB(1, 0.12 + 0.1 * k, 0.03);
+      mat.emissiveIntensity = 0.6 + k * 1.1;
     });
   }
 
@@ -6825,6 +7531,8 @@ export class NeonMesaEngine {
     this.bombs = [];
     if (this.pet) this.scene.remove(this.pet.mesh);
     this.pet = null;
+    if (this.willow) this.scene.remove(this.willow.mesh);
+    this.willow = null;
     this.hexerPending = false;
     this.removeChest();
     this.playerMaxHp = PLAYER_MAX_HP;
@@ -6849,6 +7557,7 @@ export class NeonMesaEngine {
     this.cancelSlowMo();
     this.meleeTimer = 0;
     this.pendingMelee = null;
+    this.katanaCombo = null;
 
     this.clearPinnedCorpses();
 
@@ -6909,8 +7618,9 @@ export class NeonMesaEngine {
       this.playerZ = 0;
       this.playerYaw = Math.PI / 2;
     } else if (targetZone === 'clearing') {
+      // the crater: you come in at the far end, the Tree in front of you
       this.playerX = 0;
-      this.playerZ = -3.5;
+      this.playerZ = 23;
       this.playerYaw = Math.PI;
     } else {
       this.playerX = 0;
@@ -6958,6 +7668,8 @@ export class NeonMesaEngine {
     macarico: 0,
     disco: 0,
     corrente: 0,
+    besta: 0,
+    arco: 0,
     };
     this.switchWeapon('pistol');
 
@@ -7004,6 +7716,11 @@ export class NeonMesaEngine {
     } else {
       this.updateCameraFollow(1);
     }
+    // Dev: ?item=willow installs an item from the start (to check it in the world)
+    const devItem = import.meta.env.DEV ? (new URLSearchParams(window.location.search).get('item') as VmItemId | null) : null;
+    if (devItem && VM_ITEMS.some((i) => i.id === devItem)) this.installItem(devItem);
+    // Dev: ?travessia=1 drops you straight into a crossing room (to check its platforms)
+    if (import.meta.env.DEV && this.zone === 'tree' && new URLSearchParams(window.location.search).has('travessia')) this.enterCrossingRoom();
     this.ditherPass.render(this.renderer, this.scene, this.camera, this.elapsedSec, this.damageFlash);
     this.emitHud();
   }
@@ -7038,6 +7755,9 @@ export class NeonMesaEngine {
     } else if (this.cutsceneMode === 'hate_tree') {
       if (this.hateTree && this.hateTree.time < 1) return;
       this.hateTree?.finish();
+    } else if (this.cutsceneMode === 'crater_vista') {
+      if (this.craterCine && this.craterCine.t < 0.5) return;
+      this.finishCraterVista();
     } else if (this.cutsceneMode === 'death') {
       return; // dying can't be skipped
     } else {
@@ -7070,6 +7790,7 @@ export class NeonMesaEngine {
       this.cutsceneMode === 'hate_ending' ||
       this.cutsceneMode === 'pc_ending' ||
       this.cutsceneMode === 'hate_tree' ||
+      this.cutsceneMode === 'crater_vista' ||
       this.cutsceneMode === 'death'
     );
   }
@@ -7087,6 +7808,192 @@ export class NeonMesaEngine {
   }
 
   /** Hands the camera back to gameplay smoothly from wherever the cutscene left it. */
+  // ───────────────────────── The crater's establishing shot ─────────────────────────
+  //  Four comic panels, hard cuts: the Tree's foot, its middle, its crown — then the whole
+  //  thing from miles off, the wrecked land around it and a dead city in the back right, the
+  //  cowboy a speck at its foot with an arrow: "Você está aqui!". Under 10 s, skippable.
+
+  private startCraterVista() {
+    if (!this.craterVista) {
+      this.craterVista = buildCraterVista();
+      this.scene.add(this.craterVista);
+    }
+    this.craterVista.visible = true;
+    this.camera.far = 6000;
+    this.camera.updateProjectionMatrix();
+
+    const host = this.renderer.domElement.parentElement ?? document.body;
+    const dom = document.createElement('div');
+    // the comic panel: a cream border inside a black gutter
+    dom.style.cssText =
+      'position:absolute;inset:0;pointer-events:none;z-index:27;' +
+      'box-shadow:inset 0 0 0 clamp(8px,1.6vw,18px) #0a0909, inset 0 0 0 clamp(12px,2.1vw,24px) #efe6d2;';
+    const flash = document.createElement('div');
+    flash.style.cssText = 'position:absolute;inset:0;background:#0a0909;opacity:0;';
+    // The label itself is crisp HTML (the scene renders at a quarter resolution: text there blurs)
+    const label = document.createElement('div');
+    label.textContent = 'Você está aqui!';
+    label.style.cssText =
+      'position:absolute;left:0;top:0;display:none;transform:translate(-50%,0);white-space:nowrap;' +
+      'background:#0a0909;color:#fff6c8;border:3px solid #ffd23a;box-shadow:4px 4px 0 #0a0909;padding:4px 12px;' +
+      'font:800 clamp(15px,1.9vw,24px) "JetBrains Mono",Consolas,monospace;letter-spacing:0.04em;';
+    dom.append(flash, label);
+    // "Você está aqui!": a pixel arrow + label drawn in the scene itself (constant screen size,
+    // always on top), its tip on the speck that is the cowboy
+    const arrow = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: youAreHereTexture(), depthTest: false, depthWrite: false, transparent: true, toneMapped: false, sizeAttenuation: false })
+    );
+    arrow.center.set(0.5, 1);
+    arrow.renderOrder = 50;
+    arrow.visible = false;
+    this.scene.add(arrow);
+    host.appendChild(dom);
+    // Dev: ?vistat=6 starts the shot that many seconds in (to check a panel)
+    const devT = import.meta.env.DEV ? Number(new URLSearchParams(window.location.search).get('vistat') || 0) : 0;
+    this.craterCine = { t: devT, panel: -1, fogDensity: -1, dom, arrow, label, flash, lights: [0, 0, 0, 0], sky: 0 };
+    this.cutsceneMode = 'crater_vista';
+    this.cutsceneText = null;
+    this.setLetterbox(0);
+    this.emitHud();
+  }
+
+  private updateCraterVista(dt: number) {
+    const c = this.craterCine;
+    if (!c) return;
+    if (c.fogDensity < 0) {
+      // First frame (the zone's own sky/lights are set by now): thin the fog right out so the
+      // land reads for miles, and swap in a warm hazy daylight — both put back afterwards
+      const fog = this.scene.fog as THREE.FogExp2 | null;
+      c.fogDensity = fog?.density ?? 0;
+      if (fog) fog.density = 0.00032;
+      // the Mustang's night: a near-black red sky, the black sun burning low behind the Tree
+      const bg = this.scene.background as THREE.Color | null;
+      c.sky = bg?.getHex?.() ?? 0x4a0e14;
+      if (bg?.setHex) bg.setHex(0x160405);
+      if (fog) fog.color.setHex(0x160405);
+      c.lights = [this.hemiLight.color.getHex(), this.hemiLight.groundColor.getHex(), this.keyLight.color.getHex(), this.rimLight.color.getHex()];
+      this.hemiLight.color.setHex(0xff7a5a);
+      this.hemiLight.groundColor.setHex(0x2a0a08);
+      this.keyLight.color.setHex(0xff9a62);
+      this.rimLight.color.setHex(0xff5a2a);
+    }
+    c.t += this.realDt;
+    const T = c.t;
+    const TREE_Z = CRATER_TREE_Z - GIANT_TREE_FOOT_R;
+    // [start, end, camera from, camera to, look from, look to]
+    // Panels 2 and 3 shoot from well outside the branches (they reach ~350 out) on a long lens
+    const P: [number, number, number[], number[], number[], number[], number][] = [
+      [0, 1.9, [24, 3.5, 8], [19, 5.5, 1], [0, 24, -40], [0, 34, -40], 52], // its foot: the doorway
+      [1.9, 3.7, [430, 120, 520], [405, 140, 495], [0, 165, TREE_Z], [0, 185, TREE_Z], 30], // the middle
+      [3.7, 5.5, [420, 330, 560], [400, 360, 540], [0, 430, TREE_Z], [0, 445, TREE_Z], 34], // the crown
+      [5.5, 9.6, [-680, 300, 940], [-610, 275, 860], [170, 112, -200], [170, 104, -200], 52], // all of it
+    ];
+    let i = P.findIndex(([a, b]) => T >= a && T < b);
+    if (i < 0) {
+      this.finishCraterVista();
+      return;
+    }
+    if (i !== c.panel) {
+      // hard cut: a black frame between panels, a thump on the last one
+      c.panel = i;
+      c.flash.style.transition = 'none';
+      c.flash.style.opacity = '1';
+      requestAnimationFrame(() => {
+        c.flash.style.transition = 'opacity 0.16s linear';
+        c.flash.style.opacity = '0';
+      });
+      synthAudio.playTreeThump(i); // lower each panel up the Tree; the whole thing booms
+    }
+    const [a, b, f, to, lf, lt, fov] = P[i];
+    if (this.camera.fov !== fov) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+    const u = (T - a) / (b - a);
+    const e = 1 - Math.pow(1 - u, 2); // eases in to a stop: a slow push on each panel
+    const L = (k: number) => f[k] + (to[k] - f[k]) * e;
+    const M = (k: number) => lf[k] + (lt[k] - lf[k]) * e;
+    this.camera.position.set(L(0), L(1), L(2));
+    this.camera.lookAt(M(0), M(1), M(2));
+    // The black sun sits right behind whatever the panel frames, so the Tree reads as a
+    // silhouette against it (in the wide shot, a little off to the right of the crown)
+    const sun = this.craterVista?.getObjectByName('vista_sun');
+    if (sun) {
+      const look = new THREE.Vector3(M(0), M(1), M(2));
+      const dir = look.clone().sub(this.camera.position).normalize();
+      const side = new THREE.Vector3(-dir.z, 0, dir.x).normalize();
+      sun.position.copy(look).addScaledVector(dir, 2600);
+      if (i === 3) sun.position.addScaledVector(side, 520).y += 520;
+      if (i === 1) sun.position.addScaledVector(side, -260);
+      sun.visible = i > 0;
+      sun.lookAt(this.camera.position); // billboard
+    }
+    // the panel lands with a little punch-in
+    const punch = Math.max(0, 1 - u * 6);
+    c.dom.style.transform = `scale(${1 + punch * 0.03})`;
+
+    // last panel: the arrow finds the speck that is you
+    if (i === 3 && T > 6.1) {
+      const pop = Math.min(1, (T - 6.1) / 0.18);
+      const s = 0.22 * (0.6 + pop * 0.4);
+      c.arrow.visible = true;
+      c.arrow.position.set(this.playerX, 0, this.playerZ);
+      c.arrow.scale.set(s * (360 / 230), s, 1);
+      c.arrow.center.set(0.5, 1 + Math.abs(Math.sin(T * 6)) * 0.05); // bobbing up at you
+      // the label sits just under the arrow
+      this.camera.updateMatrixWorld();
+      const v = new THREE.Vector3(this.playerX, 0, this.playerZ).project(this.camera);
+      // placed in % of the overlay (it covers the canvas), so it lines up at any size
+      const fx = (v.x * 0.5 + 0.5) * 100;
+      const fy = (-v.y * 0.5 + 0.5) * 100;
+      // the arrow sprite's shaft ends ~60% down its height (s / tan(fov/2) of the view)
+      const arrowH = (s / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 0.5 * 100;
+      c.label.style.display = 'block';
+      c.label.style.left = `${fx}%`;
+      c.label.style.top = `calc(${fy + arrowH * 0.62}% + 4px)`;
+    } else {
+      c.arrow.visible = false;
+      c.label.style.display = 'none';
+    }
+  }
+
+  private finishCraterVista() {
+    const c = this.craterCine;
+    if (c) {
+      c.dom.remove();
+      const fog = this.scene.fog as THREE.FogExp2 | null;
+      if (fog && c.fogDensity >= 0) {
+        fog.density = c.fogDensity;
+        fog.color.setHex(c.sky);
+        const bg = this.scene.background as THREE.Color | null;
+        if (bg?.setHex) bg.setHex(c.sky);
+      }
+      this.scene.remove(c.arrow);
+      c.arrow.material.dispose();
+      if (c.fogDensity >= 0) {
+        this.hemiLight.color.setHex(c.lights[0]);
+        this.hemiLight.groundColor.setHex(c.lights[1]);
+        this.keyLight.color.setHex(c.lights[2]);
+        this.rimLight.color.setHex(c.lights[3]);
+      }
+    }
+    this.craterCine = null;
+    if (this.craterVista) this.craterVista.visible = false;
+    this.camera.fov = 48;
+    this.camera.far = 160;
+    this.camera.updateProjectionMatrix();
+    this.cutsceneMode = 'none';
+    // straight back behind the cowboy, no long glide in from miles away
+    this.camPosX = this.playerX;
+    this.camPosY = 20.5;
+    this.camPosZ = this.playerZ + 14.5;
+    this.updateCameraFollow(1);
+    this.waveBanner = 'ENTRADA TRANCADA · QUEBRE AS 8 TÁBUAS';
+    this.waveBannerTimer = 3.6;
+    this.invulnTimer = Math.max(this.invulnTimer, 0.8);
+    this.emitHud();
+  }
+
   private endCinematicCamera() {
     this.camPosX = this.camera.position.x;
     this.camPosY = this.camera.position.y;
@@ -7641,7 +8548,7 @@ export class NeonMesaEngine {
       aim: (pos, target) => this.cineCamera(pos, target),
       origin: HATE_TREE_ORIGIN,
       parent: this.scene,
-      tree: cloneModelWithUniqueMaterials(this.assets.treeGiant),
+      tree: buildGiantTree({ centred: true }),
       fadeEl: this.cineFadeEl,
       shake: (a) => {
         this.trauma = Math.max(this.trauma, a);
@@ -7705,9 +8612,11 @@ export class NeonMesaEngine {
     const fromYaw = toPlayer + Math.PI;
     e.yaw = fromYaw;
     e.mesh.rotation.y = fromYaw;
+    // Dev: ?bosst=9 starts his entrance that many seconds in (to check a beat)
+    const devT = import.meta.env.DEV ? Number(new URLSearchParams(window.location.search).get('bosst') || 0) : 0;
     this.bossCine = {
       e,
-      t: 0,
+      t: devT,
       fromYaw,
       toYaw: toPlayer,
       lineSaid: false,
@@ -7722,10 +8631,18 @@ export class NeonMesaEngine {
     this.cutsceneMode = 'boss_intro';
     this.aimReticleMesh.visible = false;
     this.mouseDown = false;
-    synthAudio.startBossMusic();
+    synthAudio.startBossMusic(BOSS_INTRO.turnEnd + 0.6); // swells all the way to the turn
     this.emitHud();
   }
 
+  /**
+   * Cem Faces' entrance, in three shots, his music swelling underneath:
+   *  1. his back to you, head bowed, looking down — the faces dead still (low crane behind him)
+   *  2. side on, still motionless … then a twitch: he's noticed you (the head comes up)
+   *  3. over your shoulder: he walks himself round on his spider legs, slowly, and the faces
+   *     start to turn with him. Facing you: "Flesh, prepare to be —" and on "REBOOTED" the
+   *     head locks, a face frozen on you in a horrible expression. Then the fight.
+   */
   private updateBossIntro(dt: number) {
     const c = this.bossCine;
     if (!c) {
@@ -7735,85 +8652,258 @@ export class NeonMesaEngine {
     c.t += dt;
     const t = c.t;
     const e = c.e;
+    const B = BOSS_INTRO;
     this.setLetterbox(Math.min(1, t / 0.4));
 
-    // Rig idles (faces spin, halo turns); legs get overridden below
+    // Rig idles (halo, arms); legs, head and faces are driven here
+    const carousel = e.facesCarousel;
+    const keepYaw = c.spinAngle ?? 0;
     this.animateCemFacesRig(e, dt);
+    const smooth = (x: number) => {
+      const k = Math.max(0, Math.min(1, x));
+      return k * k * (3 - 2 * k);
+    };
 
-    // Spider turn: he walks himself around on his legs, one at a time. Each step: a leg lifts
-    // and reaches (slow, trembling), slams down with a click — and only then the body wrenches
-    // round a notch. Long, twitching holds in between. Wrong, insect-like, deliberate.
-    const TURN_START = 0.8;
-    const STEP_DUR = 0.62;
+    // ── The turn: he walks himself round on his spider legs, one leg at a time
     const STEPS = 8;
     const LEG_ORDER = [0, 2, 1, 3];
     const LEG_ANGLES = [0.68, -0.68, Math.PI - 0.68, -Math.PI + 0.68];
     let diff = c.toYaw - c.fromYaw;
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-    const tt = t - TURN_START;
-    const stepIdx = Math.max(0, Math.min(STEPS, Math.floor(tt / STEP_DUR)));
-    const s = tt < 0 ? 0 : stepIdx >= STEPS ? 1 : (tt - stepIdx * STEP_DUR) / STEP_DUR; // 0..1 inside the step
+    const tt = t - B.turnStart;
+    const stepIdx = Math.max(0, Math.min(STEPS, Math.floor(tt / B.step)));
+    const s = tt < 0 ? 0 : stepIdx >= STEPS ? 1 : (tt - stepIdx * B.step) / B.step;
     const turning = tt >= 0 && stepIdx < STEPS;
     const activeLeg = turning ? LEG_ORDER[stepIdx % 4] : -1;
-    // Lift 0→0.45 (slow reach), slam 0.45→0.58, hold the rest
-    const lift = !turning ? 0 : s < 0.45 ? Math.sin((s / 0.45) * Math.PI * 0.5) : s < 0.58 ? 1 - (s - 0.45) / 0.13 : 0;
-    const wrench = !turning ? (tt >= 0 ? 1 : 0) : s < 0.45 ? 0 : s < 0.58 ? ((s - 0.45) / 0.13) ** 2 : 1;
+    // A step, in beats: 0–0.12 anticipation (the leg draws in, the body shifts off it),
+    // 0.12–0.5 lift + reach (slow, trembling, swinging round in the turn's direction),
+    // 0.5–0.6 the slam (fast, overshooting into the ground), 0.6–1 hold (the body wrenches
+    // round a notch and settles with a shudder)
+    const anticip = !turning ? 0 : s < 0.12 ? s / 0.12 : s < 0.5 ? 1 - (s - 0.12) / 0.38 : 0;
+    const lift = !turning ? 0 : s < 0.12 ? 0 : s < 0.5 ? Math.sin(((s - 0.12) / 0.38) * Math.PI * 0.5) : s < 0.6 ? 1 - ((s - 0.5) / 0.1) ** 2 : 0;
+    const reach = !turning ? 0 : s < 0.12 ? -0.3 * anticip : s < 0.6 ? smooth((s - 0.12) / 0.48) : 1;
+    const slamDip = turning && s >= 0.58 && s < 0.78 ? Math.sin(((s - 0.58) / 0.2) * Math.PI) : 0;
+    const wrench = !turning ? (tt >= 0 ? 1 : 0) : s < 0.58 ? 0 : s < 0.72 ? ((s - 0.58) / 0.14) ** 2 * 1.08 : s < 0.85 ? 1.08 - ((s - 0.72) / 0.13) * 0.08 : 1;
     const progress = Math.min(1, (Math.min(stepIdx, STEPS) + (turning ? wrench : 0)) / STEPS);
     e.yaw = c.fromYaw + diff * progress;
+    const turnSign = Math.sign(diff || 1);
     if (e.spiderLegs) {
       e.spiderLegs.forEach((leg, i) => {
         const a = LEG_ANGLES[i] ?? 0;
         const dir = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
-        const axis = new THREE.Vector3(dir.z, 0, -dir.x); // up × dir: negative angle lifts the foot
-        const up = i === activeLeg ? lift : 0;
-        const tremble = i === activeLeg && s < 0.45 ? Math.sin(t * 61 + i) * 0.03 : 0;
-        const q = new THREE.Quaternion().setFromAxisAngle(axis, -(up * 0.62 + tremble));
-        const swing = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), up * 0.22 * Math.sign(diff || 1));
-        leg.quaternion.copy(swing.multiply(q));
+        const axis = new THREE.Vector3(dir.z, 0, -dir.x);
+        const me = i === activeLeg;
+        // the moving leg: up, trembling while it hangs there, swung round toward the turn
+        const up = me ? lift * 0.7 + anticip * 0.08 : 0;
+        const tremble = me && s > 0.15 && s < 0.5 ? Math.sin(t * 61 + i) * 0.035 + Math.sin(t * 23) * 0.02 : 0;
+        const swing = me ? reach * 0.26 * turnSign : 0;
+        // the planted ones brace: pressed down a hair and twisting against the turn on the slam
+        const brace = !me && turning ? (slamDip * 0.05 + anticip * 0.03) : 0;
+        const twist = !me && turning ? -slamDip * 0.04 * turnSign : 0;
+        const q = new THREE.Quaternion().setFromAxisAngle(axis, -(up + tremble) + brace);
+        const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), swing + twist);
+        leg.quaternion.copy(yawQ.multiply(q));
       });
     }
-    // Body: leans toward the reaching leg, dips on each slam, shudders during the holds
+    // The body: shifts off the lifting leg, sinks into each slam, shudders while it settles
     const legSide = activeLeg >= 0 ? Math.sign(Math.sin(LEG_ANGLES[activeLeg])) : 0;
-    const slamDip = turning && s >= 0.45 && s < 0.7 ? Math.sin(((s - 0.45) / 0.25) * Math.PI) * 0.14 : 0;
-    const holdShudder = turning && s >= 0.58 ? (Math.random() - 0.5) * 0.03 : 0;
-    e.mesh.rotation.set(0.04 * lift, e.yaw, -legSide * lift * 0.1 + holdShudder);
-    e.mesh.position.set(e.x + holdShudder, -slamDip, e.z);
-    // The slam: a chitinous click + a little dust, once per step
-    if (turning && s >= 0.45 && (e.fxTimer ?? -1) !== stepIdx) {
+    const legFront = activeLeg >= 0 ? Math.sign(Math.cos(LEG_ANGLES[activeLeg])) : 0;
+    const holdShudder = turning && s >= 0.62 && s < 0.9 ? (Math.random() - 0.5) * 0.025 * (1 - (s - 0.62) / 0.28) : 0;
+    const bodyBob = lift * 0.08 - slamDip * 0.18;
+    if (turning && s >= 0.58 && (e.fxTimer ?? -1) !== stepIdx) {
       e.fxTimer = stepIdx;
-      synthAudio.playCasingTink();
-      synthAudio.playCasingTink();
+      synthAudio.playEndingSample('bossSteps', 1.1, false, { offset: (stepIdx % 10) * 0.5 + 0.03, duration: 0.47, quiet: true });
       const a = (LEG_ANGLES[activeLeg] ?? 0) + e.yaw;
-      this.spawnParticles(e.x + Math.sin(a) * 2.45, 0.1, e.z + Math.cos(a) * 2.45, 6, 0x6b6560, 3, 0.4);
-      this.trauma = Math.max(this.trauma, 0.12);
+      this.spawnParticles(e.x + Math.sin(a) * 2.45, 0.1, e.z + Math.cos(a) * 2.45, 9, 0x6b6560, 3.5, 0.45);
+      this.fx.puff(e.x + Math.sin(a) * 2.45, 0.15, e.z + Math.cos(a) * 2.45, 0.6, 0x6b6560, { x: 0, z: 0 });
+      this.trauma = Math.max(this.trauma, 0.14);
     }
-    // Faces twitch now and then
-    if (e.facesCarousel && Math.random() < dt * 3) e.facesCarousel.rotation.y += (Math.random() - 0.5) * 1.2;
 
-    // The line, once he's facing you
-    if (!c.lineSaid && t >= TURN_START + STEPS * STEP_DUR + 0.35) {
+    // ── The head: bowed, still, looking down … it notices you (a jolt up) … then it leads
+    // the turn — swinging round to you ahead of the body, cocked to one side, twitching —
+    // and stays on you while the body catches up
+    if (!c.noticed && t >= B.notice) {
+      c.noticed = true;
+      synthAudio.playCasingTink();
+      synthAudio.playCasingTink();
+      this.trauma = Math.max(this.trauma, 0.16);
+    }
+    const sinceNotice = c.noticed ? t - B.notice : -1;
+    let pitch = 0.32; // bowed
+    if (c.noticed) {
+      // jolts up, overshoots a little, settles
+      const u = Math.min(1, sinceNotice / 0.25);
+      pitch = 0.32 * (1 - u) - Math.sin(Math.min(1, sinceNotice / 0.5) * Math.PI) * 0.08;
+    }
+    // where the head looks, relative to the body (it's already on you as the body turns)
+    let lead = 0;
+    if (tt >= -0.4) {
+      const remaining = diff * (1 - progress);
+      const k = smooth((tt + 0.4) / 1.6);
+      lead = remaining * 0.85 * k;
+    }
+    const twitch = c.noticed && !c.locked && Math.random() < dt * 2.5 ? (Math.random() - 0.5) * 0.18 : 0;
+    c.headTwitch = (c.headTwitch ?? 0) * Math.exp(-dt * 10) + twitch;
+    const cock = c.noticed && !c.locked ? Math.sin(Math.min(1, Math.max(0, sinceNotice - 0.4) / 1.5) * Math.PI) * 0.16 * -turnSign : 0;
+    const headQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, lead + c.headTwitch, cock, 'YXZ'));
+
+    // ── Faces: dead still → turning with him → drifting while he speaks → the lock
+    const lineAt = B.turnEnd + 0.35;
+    // The line, once he's facing you — the subtitle follows the voice word by word
+    if (!c.lineSaid && t >= lineAt) {
       c.lineSaid = true;
       e.bossLine = 'FLESH, PREPARE TO BE REBOOTED.';
       e.bossLineTimer = 3.2;
-      this.setSubtitle('FLESH, PREPARE TO BE REBOOTED.');
-      this.trauma = Math.max(this.trauma, 0.4);
+      this.trauma = Math.max(this.trauma, 0.25);
       synthAudio.playBossVoice('spawn');
     }
+    if (c.lineSaid) {
+      const v = t - lineAt;
+      this.setSubtitle(v < 0.85 ? 'FLESH,' : v < B.rebootAt ? 'FLESH, PREPARE TO BE' : 'FLESH, PREPARE TO BE REBOOTED.');
+    }
+    // "REBOOTED": the faces ratchet round and lock
+    if (c.lineSaid && !c.locked && t >= lineAt + B.rebootAt) {
+      c.locked = true;
+      c.lockT = lineAt + B.rebootAt; // on the word, not on whichever frame noticed it
+      c.lockFrom = keepYaw; // where the carousel stood last frame
+      c.lockTo = this.facesLockTarget(e, keepYaw);
+    }
 
-    // Camera: over the player's shoulder watching him turn → slow dolly up to his faces.
-    // Framed on the head (~4.6 up): the line is delivered face to face.
-    const toPlayerX = Math.sin(c.toYaw);
-    const toPlayerZ = Math.cos(c.toYaw);
-    const END = TURN_START + STEPS * STEP_DUR + 3.4;
-    const k = Math.min(1, Math.max(0, (t - 2.2) / 3.6));
-    const ease = k * k * (3 - 2 * k);
-    const shoulder = new THREE.Vector3(this.playerX + toPlayerX * 4.5 + toPlayerZ * 2.2, 4.2, this.playerZ + toPlayerZ * 4.5 - toPlayerX * 2.2);
-    const closeUp = new THREE.Vector3(e.x + toPlayerX * 7.4 + toPlayerZ * 0.8, 4.3, e.z + toPlayerZ * 7.4 - toPlayerX * 0.8);
-    const pos = t < 0.3 ? c.camFrom.clone().lerp(shoulder, t / 0.3) : shoulder.lerp(closeUp, ease);
-    const look = new THREE.Vector3(e.x, 3.2 + ease * 1.4, e.z);
+    let spin = keepYaw;
+    if (!c.locked) {
+      let target = 0;
+      if (tt >= 0 && t < B.turnEnd) target = 0.5 + 2.4 * Math.min(1, tt / (B.turnEnd - B.turnStart));
+      else if (t >= B.turnEnd) target = 0.9;
+      c.spin = (c.spin ?? 0) + (target - (c.spin ?? 0)) * Math.min(1, dt * 2.5);
+      spin += c.spin * dt;
+    } else {
+      spin = this.updateFacesLock(c, t, spin);
+    }
+    c.spinAngle = spin;
+    this.poseCemFacesHead(e, headQ, spin);
+
+    e.mesh.rotation.set(0.05 * lift * legFront + (c.noticed ? 0 : 0.06), e.yaw, -legSide * lift * 0.08 + holdShudder);
+    e.mesh.position.set(e.x + holdShudder, bodyBob, e.z);
+
+    // ── Camera: three shots, closer in
+    const F = new THREE.Vector3(Math.sin(c.fromYaw), 0, Math.cos(c.fromYaw)); // where he's looking (away)
+    const S = new THREE.Vector3(Math.cos(c.fromYaw), 0, -Math.sin(c.fromYaw));
+    const E = new THREE.Vector3(e.x, 0, e.z);
+    const shot = t < B.shot2 ? 0 : t < B.turnStart ? 1 : 2;
+    let pos: THREE.Vector3;
+    let look: THREE.Vector3;
+    if (shot === 0) {
+      // 1: low behind him, craning up over his bowed head
+      const k = smooth(t / B.shot2);
+      pos = E.clone().addScaledVector(F, -6.6 + k * 1.6).addScaledVector(S, 2.4 - k * 3.6).setY(1.4 + k * 2.6);
+      look = E.clone().addScaledVector(F, 1.6).setY(3.6 - k * 0.7);
+    } else if (shot === 1) {
+      // 2: close on his side, tracking past the still faces; the jolt when he notices you
+      const k = smooth((t - B.shot2) / (B.turnStart - B.shot2));
+      pos = E.clone().addScaledVector(S, 5.0 - k * 0.6).addScaledVector(F, 1.6 - k * 2.2).setY(4.2 + k * 0.4);
+      look = E.clone().setY(4.3 + (c.noticed ? 0.3 : 0));
+    } else {
+      // 3: a low mid shot close on him while he turns (drifting round as he does), pushing in
+      // on the faces for the line
+      const toPlayerX = Math.sin(c.toYaw);
+      const toPlayerZ = Math.cos(c.toYaw);
+      const orbit = (1 - progress) * 0.6;
+      const ox = Math.sin(c.toYaw + orbit);
+      const oz = Math.cos(c.toYaw + orbit);
+      const shoulder = new THREE.Vector3(e.x + ox * 7.2 + oz * 1.6, 2.6, e.z + oz * 7.2 - ox * 1.6);
+      const closeUp = new THREE.Vector3(e.x + toPlayerX * 5.0 + toPlayerZ * 0.6, 4.4, e.z + toPlayerZ * 5.0 - toPlayerX * 0.6);
+      const k = smooth((t - (B.turnStart + 2.5)) / (lineAt - (B.turnStart + 2.5)));
+      pos = shoulder.lerp(closeUp, k);
+      if (c.locked) {
+        // each click of the lock nudges the camera in; the last one punches
+        const p = smooth((t - (c.lockT ?? t)) / 0.75);
+        pos.lerp(new THREE.Vector3(e.x + toPlayerX * 3.2, 4.6, e.z + toPlayerZ * 3.2), p);
+      }
+      look = new THREE.Vector3(e.x, 3.4 + k * 1.2, e.z);
+    }
     this.cineCamera(pos, look);
 
-    if (t >= END) this.finishBossIntro();
+    if (c.locked && t >= (c.lockT ?? t) + B.hold) this.finishBossIntro();
+  }
+
+  /** Rotates the head and the faces carousel about the head's own centre (their nodes sit at the rig origin). */
+  private poseCemFacesHead(e: EnemyEntity, headQ: THREE.Quaternion, spin: number) {
+    const head = e.mesh.getObjectByName('head_black_base');
+    const car = e.facesCarousel;
+    if (!e.mesh.userData.headPivot) {
+      // the head's centre in rig space, measured once at rest
+      const box = new THREE.Box3();
+      const tmp = new THREE.Box3();
+      for (const o of [head, car]) {
+        if (!o) continue;
+        o.updateWorldMatrix(true, true);
+        tmp.setFromObject(o);
+        box.union(tmp);
+      }
+      const centreW = box.getCenter(new THREE.Vector3());
+      e.mesh.updateWorldMatrix(true, false);
+      e.mesh.userData.headPivot = e.mesh.worldToLocal(centreW).divide(e.mesh.scale.clone().setScalar(1));
+    }
+    const pivot = e.mesh.userData.headPivot as THREE.Vector3;
+    // rotate about the pivot from each node's rest placement (the carousel rests 4.6 m up)
+    const place = (o: THREE.Object3D | null | undefined, q: THREE.Quaternion) => {
+      if (!o) return;
+      if (!o.userData.restPos) o.userData.restPos = o.position.clone();
+      const rest = o.userData.restPos as THREE.Vector3;
+      o.quaternion.copy(q);
+      o.position.copy(pivot).add(rest.clone().sub(pivot).applyQuaternion(q));
+    };
+    place(head, headQ);
+    place(car, headQ.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), spin)));
+  }
+
+  /** The carousel angle that leaves a face square on you, at least a half turn further on. */
+  private facesLockTarget(e: EnemyEntity, spin: number) {
+    // the faces sit every quarter turn; one is square to the front at spin = k·π/2
+    const q = Math.PI / 2;
+    const next = Math.ceil(spin / q) * q;
+    return next + q * 2; // two more clicks past the next stop: three in all
+  }
+
+  /**
+   * The lock, like a mechanism: the carousel ratchets round in three hard clicks (each a snap
+   * with a little overshoot and a clack), the last one a heavy CLUNK that shakes the head.
+   * The screens drop to static on it — and come back with the face, every one of them.
+   */
+  private updateFacesLock(c: NonNullable<typeof this.bossCine>, t: number, spin: number) {
+    const from = c.lockFrom ?? spin;
+    const to = c.lockTo ?? spin;
+    const lt = t - (c.lockT ?? t);
+    const CLICK = 0.22;
+    const clicks = 3;
+    const i = Math.min(clicks - 1, Math.floor(lt / CLICK));
+    const u = Math.min(1, (lt - i * CLICK) / 0.1); // the snap takes the first 0.1 s of each click
+    const ease = u < 1 ? 1 - Math.pow(1 - u, 3) * Math.cos(u * 9) : 1; // snaps past, rings back
+    const a = from + ((to - from) * (i + Math.min(1.06, ease))) / clicks;
+    const clickNo = Math.min(clicks, Math.floor(lt / CLICK) + 1);
+    if ((c.lockClicks ?? 0) < clickNo) {
+      c.lockClicks = clickNo;
+      if (clickNo < clicks) {
+        synthAudio.playCasingTink();
+        synthAudio.playTreeThump(0);
+        this.trauma = Math.max(this.trauma, 0.22);
+      } else {
+        // CLUNK: it's locked
+        synthAudio.playTreeThump(2);
+        synthAudio.playBowReady();
+        this.trauma = Math.max(this.trauma, 0.6);
+        this.fireFlash = Math.max(this.fireFlash, 0.4);
+        applyFaceExpressions(c.e.mesh, ['static', 'static', 'static', 'static']);
+        c.staticT = (c.lockT ?? t) + (clicks - 1) * CLICK;
+      }
+    }
+    // static for a blink, then the face — on every screen
+    if (c.staticT !== undefined && !c.horror && t - c.staticT > 0.14) {
+      c.horror = true;
+      applyFaceExpressions(c.e.mesh, ['horror', 'horror', 'horror', 'horror']);
+    }
+    if (lt >= clicks * CLICK) return to;
+    return a;
   }
 
   private finishBossIntro() {
@@ -7821,6 +8911,22 @@ export class NeonMesaEngine {
     this.bossCine = null;
     if (this.cutsceneMode === 'boss_intro') this.cutsceneMode = 'none';
     if (c) {
+      // the head goes back to its rest pose (the faces keep their lock angle and spin on from it)
+      const head = c.e.mesh.getObjectByName('head_black_base');
+      if (head) {
+        head.quaternion.identity();
+        if (head.userData.restPos) head.position.copy(head.userData.restPos as THREE.Vector3);
+      }
+      const car = c.e.facesCarousel;
+      if (car) {
+        car.quaternion.identity();
+        if (car.userData.restPos) car.position.copy(car.userData.restPos as THREE.Vector3);
+        car.rotation.y = c.spinAngle ?? 0;
+      }
+      // fight 1: the horror face holds a moment, then the four moods come back
+      const boss = c.e.mesh;
+      window.setTimeout(() => applyFaceExpressions(boss), 1400);
+      c.e.mesh.rotation.x = 0;
       c.e.yaw = c.toYaw;
       c.e.mesh.rotation.y = c.toYaw;
       c.e.mesh.position.y = 0;
@@ -9178,7 +10284,8 @@ export class NeonMesaEngine {
       mesh.add(body, fuse);
       mesh.position.set(this.playerX, 1.2, this.playerZ);
       this.scene.add(mesh);
-      this.bombs.push({ mesh, sx: this.playerX, sz: this.playerZ, tx: clamped.x, tz: clamped.z, t: 0 });
+      // the active item: a longer fuse, beeping faster and faster over a red ring showing its reach
+      this.bombs.push({ mesh, sx: this.playerX, sz: this.playerZ, tx: clamped.x, tz: clamped.z, t: 0, fuse: 1.7, item: true, beepT: 0 });
       synthAudio.playWeaponPickup('rocket', 'equip');
     } else if (id === 'ironSkin') {
       this.ironSkinTimer = 5;
@@ -9252,10 +10359,26 @@ export class NeonMesaEngine {
       const fuse = b.mesh.getObjectByName('fuse') as THREE.Mesh | undefined;
       if (fuse) (fuse.material as THREE.MeshBasicMaterial).color.setHex(Math.sin(b.t * 30) > 0 ? 0xff2020 : 0xffd060);
       if (u >= 1 && Math.random() < dt * 30) this.spawnParticles(b.mesh.position.x, 0.8, b.mesh.position.z, 1, 0xffb030, 2, 0.2);
-      if (b.t >= (b.fuse ?? 1.15)) {
+      const fuseLen = b.fuse ?? 1.15;
+      if (b.item && u >= 1) {
+        // landed: its reach in red on the ground, and a beep that speeds up to the end
+        const k = Math.min(1, (b.t - 0.5) / Math.max(0.1, fuseLen - 0.5));
+        this.blastFx.warn(b.tx, b.tz, b.radius ?? 4.6, k, this.elapsedSec);
+        b.beepT = (b.beepT ?? 0) - dt;
+        const left = fuseLen - b.t;
+        if (left < 0.22 && b.beepT > -1) {
+          b.beepT = -10;
+          synthAudio.playBombBeep(1, true); // the long last tone
+        } else if (b.beepT <= 0 && left >= 0.22) {
+          b.beepT = 0.32 * (1 - k) + 0.07;
+          synthAudio.playBombBeep(k);
+        }
+      }
+      if (b.t >= fuseLen) {
         this.scene.remove(b.mesh);
         this.bombs.splice(i, 1);
         this.triggerExplosion(b.tx, b.tz, b.radius ?? 4.6, b.damage ?? 150);
+        if (b.item) this.bigBlastFx(b.tx, b.tz, b.radius ?? 4.6);
         // Bombs also clear enemy bullets in the blast
         for (const p of this.projectiles) {
           if (p.active && !p.fromPlayer && Math.hypot(p.x - b.tx, p.z - b.tz) < 4.6) {
@@ -9386,6 +10509,136 @@ export class NeonMesaEngine {
       this.scene.remove(this.pet.mesh);
       this.pet = null;
     }
+    this.updateWillow(dt);
+  }
+
+  /**
+   * Willow's Defender: rolls along stuck to your heel. Every so often it glows green and hands
+   * you ammo for the gun in your hands (or the other one, if that's the bottomless pistol).
+   */
+  private updateWillow(dt: number) {
+    if (!this.upgrades.has('willow')) {
+      if (this.willow) {
+        this.scene.remove(this.willow.mesh);
+        this.willow = null;
+      }
+      return;
+    }
+    if (!this.willow) {
+      const { mesh, leaves } = this.buildWillowCart();
+      this.scene.add(mesh);
+      this.willow = { mesh, leaves, x: this.playerX, z: this.playerZ, yaw: this.playerYaw, t: 12, glow: 0, roll: 0 };
+    }
+    const w = this.willow;
+    // glued to you: at your side, a touch behind (never between you and the camera)
+    const gx = this.playerX - Math.sin(this.playerYaw) * 0.45 + Math.cos(this.playerYaw) * 1.55;
+    const gz = this.playerZ - Math.cos(this.playerYaw) * 0.45 - Math.sin(this.playerYaw) * 1.55;
+    const k = 1 - Math.exp(-dt * 14);
+    const px = w.x;
+    const pz = w.z;
+    w.x += (gx - w.x) * k;
+    w.z += (gz - w.z) * k;
+    const moved = Math.hypot(w.x - px, w.z - pz);
+    if (moved > 0.002) {
+      const want = Math.atan2(w.x - px, w.z - pz);
+      let d = want - w.yaw;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      w.yaw += d * Math.min(1, dt * 10);
+    }
+    w.roll += moved * 3.2;
+    w.mesh.position.set(w.x, 0, w.z);
+    w.mesh.rotation.y = w.yaw;
+    w.mesh.visible = this.heroRoot.visible && !this.inVmSpace;
+    for (const child of w.mesh.children) if (child.name === 'wheel') child.rotation.x = w.roll;
+    // the branches sway as it rolls
+    const crown = w.mesh.getObjectByName('willow_crown');
+    if (crown) crown.rotation.z = Math.sin(this.elapsedSec * 2.2) * 0.05 + Math.min(0.15, moved * 2);
+
+    // Now and then: a green glow and some ammo (only out in the rooms, never at VM's)
+    if (!this.inVmSpace && !this.isCinematic()) w.t -= dt;
+    if (w.t <= 0) {
+      w.t = 15 + Math.random() * 8;
+      const pick = (id: WeaponId) => Number.isFinite(this.ammo[id]) && !WEAPONS[id].melee && id !== 'rmrf' && this.ammo[id] < WEAPONS[id].maxAmmo;
+      const target = pick(this.activeWeapon) ? this.activeWeapon : this.ownedWeapons.find(pick);
+      if (target) {
+        const max = WEAPONS[target].maxAmmo;
+        this.ammo[target] = Math.min(max, this.ammo[target] + Math.max(1, Math.ceil(max * 0.2)));
+        w.glow = 1.4;
+        this.spawnParticles(w.x, 1.4, w.z, 14, 0x4dff7a, 4, 0.5);
+        this.spawnParticles(this.playerX, 1.2, this.playerZ, 8, 0x4dff7a, 3, 0.35);
+        this.pickupBanner = `WILLOW'S DEFENDER: +MUNIÇÃO`;
+        this.pickupBannerTimer = 1.8;
+        synthAudio.playWeaponPickup(target, 'reload');
+        this.emitHud();
+      } else {
+        w.t = 4; // everything's full: try again in a bit
+      }
+    }
+    // the glow: leaves light up bright green and fade back
+    w.glow = Math.max(0, w.glow - dt);
+    const g = Math.min(1, w.glow / 0.6);
+    w.leaves.emissive.setRGB(0.18 + g * 0.3, 0.54 + g * 0.9, 0.1 + g * 0.35);
+    w.leaves.emissiveIntensity = 0.6 + g * 1.6;
+  }
+
+  /** A rusty little cart on four wheels, a weeping willow growing out of a pot of dirt in it. */
+  private buildWillowCart() {
+    const g = new THREE.Group();
+    const rust = new THREE.MeshStandardMaterial({ color: 0x8a4a24, roughness: 0.8, metalness: 0.4, emissive: 0x8a4a24, emissiveIntensity: 0.25, flatShading: true });
+    const iron = new THREE.MeshStandardMaterial({ color: 0x3a3634, roughness: 0.6, metalness: 0.6, emissive: 0x3a3634, emissiveIntensity: 0.2, flatShading: true });
+    const dirt = new THREE.MeshStandardMaterial({ color: 0x3a2618, roughness: 1, flatShading: true });
+    const bark = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.9, emissive: 0x5a3a22, emissiveIntensity: 0.25, flatShading: true });
+    const leaves = new THREE.MeshStandardMaterial({ color: 0x7ad84a, roughness: 0.8, flatShading: true, emissive: 0x2f8a1a, emissiveIntensity: 0.6 });
+    const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number, name = '') => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+      mesh.position.set(x, y, z);
+      mesh.name = name;
+      g.add(mesh);
+      return mesh;
+    };
+    // cart tub
+    box(0.62, 0.08, 0.5, rust, 0, 0.26, 0);
+    box(0.62, 0.22, 0.06, rust, 0, 0.4, 0.22);
+    box(0.62, 0.22, 0.06, rust, 0, 0.4, -0.22);
+    box(0.06, 0.22, 0.5, rust, 0.31, 0.4, 0);
+    box(0.06, 0.22, 0.5, rust, -0.31, 0.4, 0);
+    box(0.56, 0.06, 0.44, dirt, 0, 0.46, 0);
+    // tow bar toward you
+    box(0.05, 0.05, 0.42, iron, 0, 0.32, 0.45);
+    // wheels
+    for (const [x, z] of [[-0.34, 0.16], [0.34, 0.16], [-0.34, -0.16], [0.34, -0.16]]) {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.06, 8), iron);
+      wheel.rotation.z = Math.PI / 2;
+      const holder = new THREE.Group();
+      holder.name = 'wheel';
+      holder.position.set(x, 0.11, z);
+      holder.add(wheel);
+      g.add(holder);
+    }
+    // the willow
+    const crown = new THREE.Group();
+    crown.name = 'willow_crown';
+    crown.position.set(0, 0.48, 0);
+    g.add(crown);
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.07, 0.6, 6), bark);
+    trunk.position.y = 0.3;
+    crown.add(trunk);
+    const top = new THREE.Mesh(new THREE.IcosahedronGeometry(0.32, 0), leaves);
+    top.scale.set(1.15, 0.7, 1.15);
+    top.position.y = 0.66;
+    crown.add(top);
+    // weeping strands hanging all round
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const len = 0.32 + (i % 3) * 0.07;
+      const strand = new THREE.Mesh(new THREE.BoxGeometry(0.05, len, 0.05), leaves);
+      strand.position.set(Math.cos(a) * 0.3, 0.62 - len / 2, Math.sin(a) * 0.3);
+      strand.rotation.z = Math.cos(a) * 0.15;
+      strand.rotation.x = -Math.sin(a) * 0.15;
+      crown.add(strand);
+    }
+    g.scale.setScalar(1.9); // big enough to read from the gameplay camera
+    return { mesh: g, leaves };
   }
 
   /** A scrap-metal robot dog: box body, blocky head, red eye, stubby legs, antenna tail. */
@@ -9526,6 +10779,21 @@ export class NeonMesaEngine {
   /** Per-frame status effects from special ammo: burning, chilled (slow), frozen solid. */
   private updateAmmoStatus(e: EnemyEntity, dt: number) {
     if (e.state === 'ko') return;
+    // Thrown back: slides away, the push bleeding off fast; dust where it scrapes the ground
+    if ((e.flyT ?? 0) > 0) {
+      const k = Math.max(0, e.flyT! / 0.38);
+      e.x += e.flyVX! * k * dt;
+      e.z += e.flyVZ! * k * dt;
+      e.flyT! -= dt;
+      const rr = Math.hypot(e.x, e.z);
+      const lim = ARENA_RADIUS - e.radius - 0.5;
+      if (rr > lim) {
+        e.x *= lim / rr;
+        e.z *= lim / rr;
+        e.flyT = 0;
+      }
+      if (Math.random() < dt * 30) this.fx.puff(e.x, 0.15, e.z, 0.3, 0x9c8f7e, { x: 0, z: 0 });
+    }
     // Burning: damage ticks, flames, spreads to anyone it touches
     if ((e.burnT ?? 0) > 0) {
       e.burnT! -= dt;
@@ -9534,7 +10802,27 @@ export class NeonMesaEngine {
         e.burnTick = 0.3;
         this.damageEnemy(e, 4, 0, 0);
       }
-      if (Math.random() < dt * 22) this.spawnParticles(e.x + (Math.random() - 0.5) * e.radius, 0.4 + Math.random() * 1.6, e.z + (Math.random() - 0.5) * e.radius, 1, Math.random() < 0.5 ? 0xff8a1a : 0xffd23a, 2.2, 0.35);
+      // Glowing like a coal: the whole body flickers red-hot (on top of its own colours)
+      if (e.hitFlashTimer <= 0 && (e.frozenT ?? 0) <= 0) {
+        const flick = 0.75 + Math.sin(this.elapsedSec * 23 + e.id) * 0.15 + Math.random() * 0.25;
+        this.setGroupBurnGlow(e.mesh, flick * Math.min(1, e.burnT! / 0.6));
+      }
+      if (e.burnT! <= 0) this.setGroupEmissiveFlash(e.mesh, false);
+      // Flames licking up the body (mostly deep red), embers and a trail of black smoke
+      const n = Math.random() < dt * 40 ? 2 : Math.random() < dt * 20 ? 1 : 0;
+      for (let k = 0; k < n; k++) {
+        const r = Math.random();
+        this.spawnParticles(
+          e.x + (Math.random() - 0.5) * e.radius * 1.4,
+          0.3 + Math.random() * 1.8,
+          e.z + (Math.random() - 0.5) * e.radius * 1.4,
+          1,
+          r < 0.55 ? 0xff1a0a : r < 0.85 ? 0xff5a14 : 0xffb02a,
+          2.6,
+          0.42
+        );
+      }
+      if (Math.random() < dt * 6) this.spawnParticles(e.x, 1.6 + Math.random() * 0.8, e.z, 1, 0x1a0e0a, 1.4, 0.8);
       if (Math.random() < dt * 3) {
         for (const o of this.enemies) {
           if (o === e || o.state === 'ko' || (o.burnT ?? 0) > 0) continue;
@@ -9668,6 +10956,8 @@ export class NeonMesaEngine {
 
   /** Maçarico: every tick, everything in a short cone takes fire damage; flames + smoke pour out. */
   private fireFlame(sx: number, sz: number, fx: number, fz: number, damage: number) {
+    this.torchLastFire = this.elapsedSec;
+    if (!this.torchClip) this.torchClip = synthAudio.playEndingSample('torch', 0.6, true);
     const RANGE = 6;
     const COS = Math.cos(0.42);
     for (const e of this.enemies) {
@@ -9715,6 +11005,206 @@ export class NeonMesaEngine {
   }
 
   /** Corrente.exe: zap the enemy nearest the aim line, then it leaps to up to 4 more nearby. */
+  /**
+   * Corrente.exe, held: a short charge (sparks crawling over the claws), then a thick, jagged
+   * bolt of real lightning from the gun to the target and on to up to 3 more nearby (4 in all),
+   * branching as it goes. It burns them for as long as you hold it, draining the charge.
+   */
+  private updateChainBeam(dt: number) {
+    if ((this.mouseDown || this.touchFiring) && this.ammo.corrente <= 0 && this.fireCooldown <= 0) this.dryFire();
+    const held = (this.mouseDown || this.touchFiring) && this.ammo.corrente > 0;
+    this.mouseJustPressed = false;
+    if (!held) {
+      this.stopChainBeam();
+      return;
+    }
+    const fx = Math.sin(this.playerYaw);
+    const fz = Math.cos(this.playerYaw);
+    // the bolt leaves from between the gun's claws, wherever the gun is
+    const tip = new THREE.Vector3(this.playerX + fx * 1.25, 1.2, this.playerZ + fz * 1.25);
+    const muzzle = this.weaponModels.corrente?.getObjectByName('muzzle');
+    if (muzzle) {
+      this.heroRoot.updateMatrixWorld(true);
+      muzzle.getWorldPosition(tip);
+    }
+    const sx = tip.x;
+    const sz = tip.z;
+    this.beamCharge += dt;
+    if (this.beamCharge < CHAIN_CHARGE) {
+      // charging: arcs crawl over the claws
+      if (Math.random() < dt * 40) this.spawnParticles(sx + (Math.random() - 0.5) * 0.4, 1.2 + (Math.random() - 0.5) * 0.4, sz + (Math.random() - 0.5) * 0.4, 1, Math.random() < 0.5 ? 0xd8c8ff : 0xffffff, 2.5, 0.12);
+      if (this.beamSoundT <= 0) {
+        synthAudio.playShoot('corrente');
+        this.beamSoundT = 0.2;
+      }
+      this.beamSoundT -= dt;
+      return;
+    }
+
+    // the chain: nearest on the aim line, then the nearest not yet struck, up to 4
+    const live = this.enemies.filter((e) => e.state !== 'ko' && !e.husk && !(e.emergeTimer && e.emergeTimer > 0));
+    const chain: EnemyEntity[] = [];
+    let best = Infinity;
+    let first: EnemyEntity | null = null;
+    for (const e of live) {
+      const dx = e.x - sx;
+      const dz = e.z - sz;
+      const d = Math.hypot(dx, dz);
+      if (d > 14) continue;
+      const cos = (dx * fx + dz * fz) / Math.max(d, 0.01);
+      if (cos < Math.cos(0.55)) continue;
+      const score = d * (2 - cos);
+      if (score < best) {
+        best = score;
+        first = e;
+      }
+    }
+    if (first) {
+      chain.push(first);
+      while (chain.length < 4) {
+        const cur = chain[chain.length - 1];
+        let next: EnemyEntity | null = null;
+        let nd = 7;
+        for (const e of live) {
+          if (chain.includes(e)) continue;
+          const d = Math.hypot(e.x - cur.x, e.z - cur.z);
+          if (d < nd) {
+            nd = d;
+            next = e;
+          }
+        }
+        if (!next) break;
+        chain.push(next);
+      }
+    }
+
+    // damage over time, a little less at each jump
+    this.beamTickT -= dt;
+    if (this.beamTickT <= 0) {
+      this.beamTickT = 0.1;
+      let dmg = WEAPONS.corrente.damage * 0.32;
+      let px = sx;
+      let pz = sz;
+      for (const e of chain) {
+        const dl = Math.hypot(e.x - px, e.z - pz) || 1;
+        this.damageEnemy(e, Math.max(1, Math.round(dmg)), ((e.x - px) / dl) * 0.2, ((e.z - pz) / dl) * 0.2);
+        this.spawnParticles(e.x, 1.1, e.z, 2, 0xd8c8ff, 4, 0.15);
+        px = e.x;
+        pz = e.z;
+        dmg *= 0.8;
+      }
+    }
+    // the charge drains while it's live
+    this.beamDrainT -= dt;
+    if (this.beamDrainT <= 0) {
+      this.beamDrainT = 0.15;
+      this.ammo.corrente = Math.max(0, this.ammo.corrente - 1);
+      if (this.ammo.corrente <= 0) {
+        this.stopChainBeam();
+        this.applyWeaponFallback();
+        this.emitHud();
+        return;
+      }
+      this.hudSyncTimer = 0;
+    }
+    // crackle
+    this.beamSoundT -= dt;
+    if (this.beamSoundT <= 0) {
+      this.beamSoundT = 0.13 + Math.random() * 0.06;
+      synthAudio.playShoot('corrente');
+    }
+    this.trauma = Math.max(this.trauma, 0.06);
+
+    // the bolt itself, re-struck ~25 times a second so it writhes
+    this.beamRedraw -= dt;
+    if (this.beamRedraw <= 0) {
+      this.beamRedraw = 0.04;
+      const pts: THREE.Vector3[] = [tip.clone()];
+      if (chain.length === 0) pts.push(new THREE.Vector3(sx + fx * 6, tip.y, sz + fz * 6)); // into the air
+      for (const e of chain) pts.push(new THREE.Vector3(e.x, 1.1, e.z));
+      this.drawThickBolt(pts, chain.length === 0);
+    }
+  }
+
+  private stopChainBeam() {
+    this.beamCharge = 0;
+    this.beamTickT = 0;
+    if (this.beamMesh) {
+      this.scene.remove(this.beamMesh);
+      this.beamMesh.geometry.dispose();
+      this.beamMesh = null;
+      this.beamGlow?.geometry.dispose();
+      if (this.beamGlow) this.scene.remove(this.beamGlow);
+      this.beamGlow = null;
+    }
+  }
+
+  /**
+   * A thick lightning bolt through `pts`: each hop split into jittered segments that zig-zag
+   * sideways and up/down, with thin forks splitting off; a white-hot core inside a violet glow.
+   */
+  private drawThickBolt(pts: THREE.Vector3[], fizzle: boolean) {
+    const core: THREE.BufferGeometry[] = [];
+    const glow: THREE.BufferGeometry[] = [];
+    const seg = (a: THREE.Vector3, b: THREE.Vector3, w: number) => {
+      const len = a.distanceTo(b);
+      if (len < 0.01) return;
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), b.clone().sub(a).normalize());
+      const m = new THREE.Matrix4().compose(mid, q, new THREE.Vector3(1, 1, 1));
+      core.push(new THREE.BoxGeometry(w, w, len + w).applyMatrix4(m));
+      glow.push(new THREE.BoxGeometry(w * 3.4, w * 3.4, len + w * 2).applyMatrix4(m));
+    };
+    const bolt = (a: THREE.Vector3, b: THREE.Vector3, w: number, forks: number) => {
+      const len = a.distanceTo(b);
+      const n = Math.max(3, Math.round(len / 0.7));
+      const dir = b.clone().sub(a).normalize();
+      const side = new THREE.Vector3(-dir.z, 0, dir.x);
+      let prev = a.clone();
+      for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        const p = a.clone().lerp(b, t);
+        if (i < n) {
+          const amp = Math.sin(t * Math.PI) * Math.min(1.1, len * 0.12);
+          p.addScaledVector(side, (Math.random() - 0.5) * amp * 2);
+          p.y += (Math.random() - 0.5) * amp;
+        }
+        seg(prev, p, w);
+        // forks off the main channel, thinner, branching away and down
+        if (forks > 0 && i < n && Math.random() < 0.28) {
+          const fl = 0.8 + Math.random() * 1.8;
+          const fd = dir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), (Math.random() < 0.5 ? 1 : -1) * (0.5 + Math.random() * 0.7));
+          const end = p.clone().addScaledVector(fd, fl);
+          end.y -= Math.random() * 0.6;
+          bolt(p, end, w * 0.45, forks - 1);
+        }
+        prev = p;
+      }
+    };
+    for (let i = 0; i < pts.length - 1; i++) bolt(pts[i], pts[i + 1], fizzle ? 0.07 : 0.13, 2);
+    const merge = (list: THREE.BufferGeometry[]) => mergeGeometries(list.map((g) => g.toNonIndexed()))!;
+    const coreGeo = merge(core);
+    const glowGeo = merge(glow);
+    if (!this.beamMesh) {
+      this.beamMesh = new THREE.Mesh(coreGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }));
+      this.beamGlow = new THREE.Mesh(
+        glowGeo,
+        new THREE.MeshBasicMaterial({ color: 0xa58cff, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+      );
+      this.beamMesh.frustumCulled = false;
+      this.beamGlow.frustumCulled = false;
+      this.scene.add(this.beamGlow, this.beamMesh);
+    } else {
+      this.beamMesh.geometry.dispose();
+      this.beamMesh.geometry = coreGeo;
+      this.beamGlow!.geometry.dispose();
+      this.beamGlow!.geometry = glowGeo;
+    }
+    (this.beamGlow!.material as THREE.MeshBasicMaterial).opacity = 0.35 + Math.random() * 0.25;
+    for (const g of core) g.dispose();
+    for (const g of glow) g.dispose();
+  }
+
   private fireChainLightning(sx: number, sz: number, fx: number, fz: number, damage: number) {
     const live = this.enemies.filter((e) => e.state !== 'ko' && !(e.emergeTimer && e.emergeTimer > 0));
     let first: EnemyEntity | null = null;
@@ -10532,8 +12022,12 @@ export class NeonMesaEngine {
     const item = VM_ITEMS.find((i) => i.id === id);
     if (!item) return;
     if (item.kind === 'active') {
-      // Actives share one slot (F): a new one replaces the old
-      if (this.activeItem) this.upgrades.delete(this.activeItem);
+      // Actives share one slot (F): a new one replaces the old, which is left on the floor —
+      // walk back to it and press E to take it again (the charge comes back full)
+      if (this.activeItem && this.activeItem !== id) {
+        this.upgrades.delete(this.activeItem);
+        this.spawnItemPickup(this.activeItem, this.playerX, this.playerZ);
+      }
       this.activeItem = id;
       this.activeMax = item.charge ?? 400;
       this.activeCharge = this.activeMax; // comes charged
@@ -10816,10 +12310,10 @@ export class NeonMesaEngine {
     }
   }
 
-  public switchWeapon(weaponId: WeaponId) {
+  public switchWeapon(weaponId: WeaponId, force = false) {
     if (!this.ownedWeapons.includes(weaponId)) return;
-    if (weaponId !== 'pistol' && this.ammo[weaponId] <= 0) return;
-    if (weaponId !== this.activeWeapon) {
+    // (empty guns can be picked on purpose: firing one just clicks dry)
+    if (weaponId !== this.activeWeapon || force) {
       this.weaponHeatState = { heat: 0, overheated: false, overheatTimer: 0, reloadFlashTimer: 0.14 };
     }
     this.activeWeapon = weaponId;
@@ -10909,11 +12403,129 @@ export class NeonMesaEngine {
   private startMeleeSwing(weaponId: WeaponId) {
     const spec = WEAPONS[weaponId].melee;
     if (!spec) return;
+    if (weaponId === 'katana') {
+      // One click, one slash: right, left, then a wide finisher if you keep clicking in rhythm —
+      // each one carries you forward a little on its own
+      const chained = this.elapsedSec - this.katanaLastSlash < KATANA_CHAIN && this.katanaStep >= 0 && this.katanaStep < 2;
+      const step = chained ? this.katanaStep + 1 : 0;
+      this.katanaStep = step;
+      this.katanaLastSlash = this.elapsedSec;
+      const yaw = this.playerYaw;
+      this.katanaCombo = { step, t: 0, dirX: Math.sin(yaw), dirZ: Math.cos(yaw), ghost: 0 };
+      this.fireCooldown = step === 2 ? 0.42 : 0.17;
+      this.katanaSlash(step);
+      return;
+    }
+    this.meleeSweepDir = 1;
     this.meleeStyle = spec.style;
     this.meleeAnimDuration = spec.animDuration;
     this.meleeTimer = spec.animDuration;
     this.pendingMelee = { weapon: weaponId, timer: spec.windup };
     synthAudio.playShoot(weaponId);
+  }
+
+  /**
+   * Anime smear: a thick crescent with knife-point ends round the hero, white-hot along its
+   * leading edge, drawn on across the arc in a blink and then fading as it widens a touch.
+   */
+  private spawnSmear(o: { radius: number; width: number; arc: number; color: number; tilt: number; y: number; life: number; dir: number }) {
+    const SEG = 28;
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    const tint = new THREE.Color(o.color);
+    const a0 = -o.arc / 2;
+    for (let i = 0; i <= SEG; i++) {
+      const u = i / SEG;
+      const a = a0 + u * o.arc;
+      const thick = Math.sin(Math.pow(u, 0.7) * Math.PI) * o.width; // fat toward the end of the cut, sharp tips
+      const rIn = o.radius - thick;
+      const ca = Math.sin(a);
+      const sa = Math.cos(a);
+      pos.push(ca * rIn, 0, sa * rIn, ca * o.radius, 0, sa * o.radius);
+      // inner edge tinted and dim, outer (leading) edge white-hot; brighter toward the end
+      const k = 0.35 + u * 0.65;
+      col.push(tint.r * k * 0.5, tint.g * k * 0.5, tint.b * k * 0.5, k, k, k);
+      if (i < SEG) {
+        const b = i * 2;
+        idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.setIndex(idx);
+    geo.setDrawRange(0, 0);
+    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(this.playerX, o.y, this.playerZ);
+    mesh.rotation.set(0, this.playerYaw, o.tilt, 'YXZ');
+    mesh.scale.set(o.dir, 1, 1);
+    mesh.renderOrder = 8;
+    this.scene.add(mesh);
+    this.smears.push({ mesh, t: 0, life: o.life, total: SEG * 6 });
+  }
+
+  private updateSmears(dt: number) {
+    for (let i = this.smears.length - 1; i >= 0; i--) {
+      const sm = this.smears[i];
+      sm.t += dt;
+      // drawn on across the arc in 0.06 s
+      const reveal = Math.min(1, sm.t / 0.06);
+      sm.mesh.geometry.setDrawRange(0, Math.floor((sm.total * reveal) / 6) * 6);
+      const fade = Math.max(0, 1 - Math.max(0, sm.t - 0.05) / sm.life);
+      (sm.mesh.material as THREE.MeshBasicMaterial).opacity = fade;
+      const grow = 1 + sm.t * 0.6;
+      sm.mesh.scale.set(Math.sign(sm.mesh.scale.x) * grow, 1, grow);
+      if (fade <= 0) {
+        this.scene.remove(sm.mesh);
+        sm.mesh.geometry.dispose();
+        (sm.mesh.material as THREE.Material).dispose();
+        this.smears.splice(i, 1);
+      }
+    }
+  }
+
+  /** One slash of the katana combo (0, 1: quick cuts; 2: the wide, heavier finisher). */
+  private katanaSlash(step: number) {
+    const spec = WEAPONS.katana.melee!;
+    const finisher = step === 2;
+    this.meleeStyle = 'slash';
+    this.meleeSweepDir = step === 1 ? -1 : 1;
+    this.meleeAnimDuration = finisher ? 0.34 : 0.26;
+    this.meleeTimer = this.meleeAnimDuration;
+    this.pendingMelee = {
+      weapon: 'katana',
+      timer: spec.windup,
+      opts: finisher ? { dmgMul: 1.6, rangeMul: 1.25, arcDeg: 200, noLunge: true } : { noLunge: true },
+    };
+    synthAudio.playShoot('katana');
+    if (finisher) this.trauma = Math.min(1, this.trauma + 0.12);
+  }
+
+  private updateKatanaCombo(dt: number) {
+    const c = this.katanaCombo;
+    if (!c) return;
+    if (this.activeWeapon !== 'katana' || this.fallTimer > 0 || this.phase !== 'playing') {
+      this.katanaCombo = null;
+      return;
+    }
+    c.t += dt;
+    // the slash's own lunge: ~1.3 m (the finisher ~2 m), fast then settling
+    const finisher = c.step === 2;
+    const dur = finisher ? 0.22 : 0.15;
+    if (c.t < dur) {
+      const speed = (finisher ? 13 : 12) * (1 - (c.t / dur) * 0.6);
+      this.playerX += c.dirX * speed * dt;
+      this.playerZ += c.dirZ * speed * dt;
+      c.ghost -= dt;
+      if (c.ghost <= 0) {
+        c.ghost = 0.05;
+        this.spawnGhost();
+      }
+    } else {
+      this.katanaCombo = null;
+    }
   }
 
   /**
@@ -10923,20 +12535,30 @@ export class NeonMesaEngine {
    *    long stagger, dust and a crack in the ground
    * Both smash destructible props and chip the clearing barricade.
    */
-  private resolveMeleeHit(weaponId: WeaponId) {
+  private resolveMeleeHit(weaponId: WeaponId, opts: MeleeHitOpts = {}) {
     const weapon = WEAPONS[weaponId];
-    const spec = weapon.melee;
-    if (!spec || this.phase !== 'playing') return;
+    const base = weapon.melee;
+    if (!base || this.phase !== 'playing') return;
+    const spec = { ...base, range: base.range * (opts.rangeMul ?? 1), arcDeg: opts.arcDeg ?? base.arcDeg };
+    const dmgMul = opts.dmgMul ?? 1;
     const fx = Math.sin(this.playerYaw);
     const fz = Math.cos(this.playerYaw);
     const slam = spec.style === 'slam';
     const arcCos = Math.cos(((spec.arcDeg / 2) * Math.PI) / 180);
 
     // Short lunge into the swing (obstacle collision resolves next frame)
-    const lunge = slam ? 0.35 : 0.6;
+    const lunge = opts.noLunge ? 0 : slam ? 0.35 : 0.6;
     this.playerX += fx * lunge;
     this.playerZ += fz * lunge;
     this.fx.meleeSwing(this.playerX, this.playerZ, this.playerYaw, spec.style, spec.range / 2.9, weaponId === 'hammer');
+    if (weaponId === 'hammer') {
+      this.spawnSmear({ radius: spec.range * 0.95, width: 1.25, arc: 2.6, color: 0xffa04a, tilt: 0.12, y: 0.9, life: 0.3, dir: 1 });
+    } else {
+      const big = (opts.dmgMul ?? 1) > 1.2;
+      const tilt = 0.32 * this.meleeSweepDir;
+      this.spawnSmear({ radius: spec.range * 0.92, width: big ? 0.75 : 0.5, arc: big ? 3.3 : 2.5, color: 0x9fd8ff, tilt, y: 1.15, life: big ? 0.26 : 0.18, dir: this.meleeSweepDir });
+      if (big) this.spawnSmear({ radius: spec.range * 0.7, width: 0.35, arc: 3.0, color: 0xffffff, tilt: -tilt, y: 1.35, life: 0.22, dir: -this.meleeSweepDir });
+    }
 
     const impactX = this.playerX + fx * spec.range * 0.65;
     const impactZ = this.playerZ + fz * spec.range * 0.65;
@@ -10967,7 +12589,7 @@ export class NeonMesaEngine {
         px = ax / al;
         pz = az / al;
       }
-      this.damageEnemy(e, boss ? weapon.damage * 0.5 : weapon.damage, px, pz);
+      this.damageEnemy(e, (boss ? weapon.damage * 0.5 : weapon.damage) * dmgMul, px, pz);
       this.onSoulHit(e);
       // Blades also throw blood sideways across the cut
       if (!slam) {
@@ -11020,9 +12642,9 @@ export class NeonMesaEngine {
     }
 
     // Chop / smash the wooden barricade
-    if (this.zone === 'clearing' && this.barricadeHp > 0 && this.playerZ < -15.6 && Math.abs(this.playerX) < 6.4) {
+    if (this.zone === 'clearing' && this.barricadeHp > 0 && this.playerZ < BARRICADE_Z + 2.9 && Math.abs(this.playerX) < DOOR_R + 1) {
       connected = true;
-      this.damageBarricade(weapon.damage * 0.6, this.playerX + fx, 1.2, -18.2);
+      this.damageBarricade(weapon.damage * 0.6, this.playerX + fx, 1.2, BARRICADE_Z + 0.3);
     }
 
     if (slam) {
@@ -11038,11 +12660,19 @@ export class NeonMesaEngine {
       this.trauma = Math.min(1, this.trauma + (connected ? 0.75 : 0.45));
     }
 
+    if (weaponId === 'hammer') synthAudio.playHammer(connected);
+
     // Only a swing that hits something wears the blade down
     if (connected && Number.isFinite(this.ammo[weaponId]) && this.ownedWeapons.includes(weaponId)) {
       this.ammo[weaponId] = Math.max(0, this.ammo[weaponId] - 1);
       if (this.ammo[weaponId] <= 0 && this.activeWeapon === weaponId) {
-        const fb = ensureUsableWeapon(this.ownedWeapons, this.activeWeapon, this.ammo);
+        // A broken blade is gone for good (unlike an empty gun)
+        const rest = this.ownedWeapons.filter((w) => w !== weaponId);
+        if (!rest.some((w) => w === 'pistol' || this.ammo[w] > 0)) {
+          rest.push('pistol');
+          this.ammo.pistol = Infinity;
+        }
+        const fb = ensureUsableWeapon(rest, rest.find((w) => w === 'pistol' || this.ammo[w] > 0)!, this.ammo);
         this.ownedWeapons = fb.ownedWeapons;
         this.ammo = fb.ammo;
         if (fb.activeWeapon !== this.activeWeapon || fb.restoredPistol) {
@@ -11106,6 +12736,8 @@ export class NeonMesaEngine {
       treeSubBiome: this.treeSubBiome,
       treeCyberRatio: this.treeCyberRatio,
       treeDepth: this.treeDepth,
+      subRoom: this.subRoomLetter(),
+      noAmmo: this.noAmmoTimer > 0,
       treePath: [...this.treePath],
       portalOpen: this.portalOpen && !this.inVmSpace,
       vmGate: !!this.vmDoor?.isOpen && !this.inVmSpace,

@@ -112,17 +112,22 @@ export class HateTreeScene {
     tree.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(tree);
     const size = box.getSize(new THREE.Vector3());
-    const scale = 34 / Math.max(1, size.y); // a colossus in the frame, whatever the model's units
+    // a colossus in the frame, whatever the model's units (the Data Tree: by its trunk)
+    const trunkR = tree.userData.trunkRadius as number | undefined;
+    const scale = trunkR ? 10 / trunkR : 34 / Math.max(1, size.y);
     tree.scale.multiplyScalar(scale);
     tree.updateMatrixWorld(true);
     box.setFromObject(tree);
     tree.position.y -= box.min.y;
-    tree.position.x -= (box.min.x + box.max.x) / 2;
-    tree.position.z -= (box.min.z + box.max.z) / 2;
+    if (!trunkR) {
+      tree.position.x -= (box.min.x + box.max.x) / 2;
+      tree.position.z -= (box.min.z + box.max.z) / 2;
+    }
     tree.updateMatrixWorld(true);
     box.setFromObject(tree);
-    this.height = box.max.y - box.min.y;
-    this.radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2;
+    // frame the trunk, not the whole spread of its branches
+    this.height = trunkR ? Math.min(box.max.y - box.min.y, 46) : box.max.y - box.min.y;
+    this.radius = trunkR ? 10 : Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2;
     this.treeRoot.add(tree);
     this.group.add(this.treeRoot);
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Gamepad2, Pause, RefreshCw, RotateCcw, Volume2, VolumeX } from 'lucide-react';
-import { SKIN_MAP, WEAPONS } from '../game/config';
+import { SKIN_MAP, VM_ITEMS, WEAPONS } from '../game/config';
 import type { ArenaZone, HudSnapshot, WeaponId } from '../game/types';
 import { countSoulItems, SOUL_AWAKEN_COUNT } from '../game/souls';
 import { synthAudio } from '../game/audio';
@@ -163,7 +163,7 @@ export function GameHud({
         <div className="hud-panel px-2.5 py-2 sm:px-3.5 sm:py-2.5 flex flex-col gap-2 min-w-0">
           {(inTree || hud.stormActive) && (
             <div className="flex items-baseline gap-2.5 whitespace-nowrap">
-              {inTree && <span className="hud-label">PROFUNDIDADE {hud.treeDepth}</span>}
+              {inTree && <span className="hud-label">PROFUNDIDADE {hud.treeDepth}{hud.subRoom}</span>}
               {hud.stormActive && <span className="hud-chip hud-pulse">TEMPESTADE</span>}
             </div>
           )}
@@ -532,6 +532,15 @@ export function GameHud({
         </div>
       )}
 
+      {/* ─────────────── Empty gun warning ─────────────── */}
+      {hud.noAmmo && (
+        <div className={`fixed left-1/2 -translate-x-1/2 pointer-events-none ${touchEnabled ? 'bottom-72' : 'bottom-44'}`}>
+          <span className="no-ammo-blink hud-title text-sm sm:text-base px-3 py-1" style={{ color: '#ff2a2a', background: 'rgba(10,4,4,0.85)', border: '2px solid #ff2a2a' }}>
+            ARMA SEM MUNIÇÃO
+          </span>
+        </div>
+      )}
+
       {/* ─────────────── Nearby pickup prompt ─────────────── */}
       {swapInfo && (
         <div
@@ -547,6 +556,31 @@ export function GameHud({
                 +1
               </span>
             </div>
+          ) : swapInfo.kind === 'item' && swapInfo.item ? (
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onSwapWeapon();
+              }}
+              aria-label={`Pegar ${VM_ITEMS.find((i) => i.id === swapInfo.item)?.name ?? ''} [E]`}
+              className="hud-panel px-3 py-1.5 flex items-center gap-2.5 cursor-pointer"
+            >
+              <span className="hud-key">E</span>
+              {hud.activeItem && (
+                <>
+                  <span style={{ filter: 'grayscale(0.85) brightness(0.7)' }}>
+                    <ItemIcon id={hud.activeItem} className="w-6 h-6" />
+                  </span>
+                  <RefreshCw className="w-3.5 h-3.5" style={{ color: 'var(--hud-muted)' }} />
+                </>
+              )}
+              <ItemIcon id={swapInfo.item} className="w-9 h-9" />
+              <span className="hud-title text-[10px] sm:text-xs">
+                {(VM_ITEMS.find((i) => i.id === swapInfo.item)?.name ?? '').toUpperCase()}
+              </span>
+            </button>
           ) : swapInfo.requiresSwap && swapInfo.weaponId && swapInfo.replacingWeaponId ? (
             <button
               type="button"
@@ -600,7 +634,7 @@ export function GameHud({
             </span>
           </div>
 
-          <WeaponIcon weapon={hud.activeWeapon} className={touchEnabled ? 'w-full h-14' : 'w-full h-20 sm:h-24'} />
+          <WeaponIcon weapon={hud.activeWeapon} empty={hud.ammo[hud.activeWeapon] <= 0} className={touchEnabled ? 'w-full h-14' : 'w-full h-20 sm:h-24'} />
 
           {activeAmmoFinite && (
             <div className="hud-track hud-segments h-[5px]" style={{ ['--seg' as string]: '5px' }}>
@@ -650,7 +684,7 @@ export function GameHud({
                   {finite ? String(ammo).padStart(2, '0') : '∞'}
                 </span>
               </div>
-              <WeaponIcon weapon={wId} dimmed className="w-full h-10 sm:h-12" />
+              <WeaponIcon weapon={wId} dimmed empty={finite && ammo <= 0} className="w-full h-10 sm:h-12" />
               {finite && (
                 <div className="hud-track h-[3px] w-full">
                   <div

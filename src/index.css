@@ -1743,3 +1743,13 @@ html.hand-cursor * {
 @media (prefers-reduced-motion: reduce) {
   .prog-terminal-caret, .hud-hacked { animation: none; }
 }
+
+/* "ARMA SEM MUNIÇÃO": a hard red on/off blink */
+.no-ammo-blink {
+  animation: noAmmoBlink 0.32s steps(1, end) infinite;
+  letter-spacing: 0.12em;
+}
+@keyframes noAmmoBlink {
+  0% { opacity: 1; }
+  50% { opacity: 0.15; }
+}

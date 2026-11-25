@@ -14,10 +14,11 @@ interface TitleScreenProps {
   onOpenSkins: () => void;
   onOpenAchievements: () => void;
   onOpenLeaderboard: () => void;
+  onOpenOptions: () => void;
   onToggleMute: () => void;
 }
 
-type ItemId = 'start' | 'skins' | 'achievements' | 'scores' | 'sound';
+type ItemId = 'start' | 'skins' | 'achievements' | 'scores' | 'options' | 'sound';
 
 /**
  * Main menu: pixel logo, a keyboard-driven list (↑/↓ or W/S, Enter) with a ▶ cursor, the
@@ -33,6 +34,7 @@ export function TitleScreen({
   onOpenSkins,
   onOpenAchievements,
   onOpenLeaderboard,
+  onOpenOptions,
   onToggleMute,
 }: TitleScreenProps) {
   const skin = SKIN_MAP[equippedSkin];
@@ -52,6 +54,7 @@ export function TitleScreen({
     { id: 'skins', label: 'Skins' },
     { id: 'achievements', label: 'Conquistas' },
     { id: 'scores', label: 'Placar' },
+    { id: 'options', label: 'Opções' },
     { id: 'sound', label: muted ? 'Som: desligado' : 'Som: ligado' },
   ];
 
@@ -61,6 +64,7 @@ export function TitleScreen({
     } else if (id === 'skins') onOpenSkins();
     else if (id === 'achievements') onOpenAchievements();
     else if (id === 'scores') onOpenLeaderboard();
+    else if (id === 'options') onOpenOptions();
     else onToggleMute();
   };
 

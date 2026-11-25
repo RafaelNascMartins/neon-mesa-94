@@ -4,7 +4,7 @@ import { AchievementsModal } from './components/AchievementsModal';
 import { BackpackModal } from './components/BackpackModal';
 import { GameHud } from './components/GameHud';
 import { HandCursor } from './components/HandCursor';
-import { GameOverModal, PauseModal } from './components/GameModals';
+import { GameOverModal, OptionsModal, PauseModal } from './components/GameModals';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { SkinsModal } from './components/SkinsModal';
 import { SoulSelect } from './components/SoulSelect';
@@ -46,6 +46,8 @@ const INITIAL_HUD: HudSnapshot = {
   treeSubBiome: 'megastructure',
   treeCyberRatio: 0.5,
   treeDepth: 0,
+  subRoom: '',
+  noAmmo: false,
   treePath: [],
   portalOpen: false,
   vmGate: false,
@@ -81,6 +83,8 @@ const INITIAL_HUD: HudSnapshot = {
     macarico: 0,
     disco: 0,
     corrente: 0,
+    besta: 0,
+    arco: 0,
   },
   weaponHeat: 0,
   weaponOverheated: false,
@@ -152,6 +156,7 @@ export default function App() {
 
   const [showSkins, setShowSkins] = useState(false);
   const [showAchievements, setShowAchievements] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
@@ -357,16 +362,20 @@ export default function App() {
           equippedSkin={progress.equippedSkin}
           muted={muted}
           assetsReady={assetsReady}
-          interactive={!showSkins && !showLeaderboard && !showAchievements}
+          interactive={!showSkins && !showLeaderboard && !showAchievements && !showOptions}
           onStart={startBoot}
           onOpenSkins={() => setShowSkins(true)}
           onOpenAchievements={() => setShowAchievements(true)}
           onOpenLeaderboard={openLeaderboard}
+          onOpenOptions={() => setShowOptions(true)}
           onToggleMute={handleToggleMute}
         />
       )}
 
-      {(phase === 'playing' || phase === 'paused') && (
+      {/* Kept mounted (just hidden) while VM's shop is open, so coming back out doesn't
+          replay the map-name title as if it were a new map */}
+      {(phase === 'playing' || phase === 'paused' || phase === 'shop') && (
+        <div style={{ display: phase === 'shop' ? 'none' : 'contents' }}>
         <GameHud
           hud={hud}
           muted={muted}
@@ -385,6 +394,7 @@ export default function App() {
           onDash={() => engineRef.current?.triggerDash()}
           onTalkVm={() => engineRef.current?.openVm()}
         />
+        </div>
       )}
 
       {phase === 'shop' && engineRef.current && (
@@ -442,6 +452,18 @@ export default function App() {
       )}
 
       {showAchievements && <AchievementsModal progress={progress} onClose={() => setShowAchievements(false)} />}
+      {showOptions && phase === 'title' && (
+        <OptionsModal
+          options={options}
+          onChangeOptions={handleChangeOptions}
+          touchEnabled={touchEnabled}
+          onToggleTouch={() => {
+            manualTouchOverride.current = true;
+            setTouchEnabled((v) => !v);
+          }}
+          onClose={() => setShowOptions(false)}
+        />
+      )}
 
       <HandCursor />
 

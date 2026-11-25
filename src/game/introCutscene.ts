@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { cloneModelWithUniqueMaterials, createHighwayStripTexture, type LoadedGlbAssets } from './assets';
-import { synthAudio } from './audio';
+import { synthAudio, type EndingClip } from './audio';
 import type { CombatFx } from './combatFx';
 import { tumbleweedRepel } from './zoneDetails';
 
@@ -106,7 +106,7 @@ function glowMaterial(map: THREE.Texture, color = 0xffffff, opacity = 1): THREE.
  * corona and slowly turning light shafts still pouring out from behind it.
  * Billboarded toward the camera by the caller.
  */
-function buildBlackSun(radius: number): { group: THREE.Group; rays: THREE.Group; rayMats: THREE.MeshBasicMaterial[] } {
+export function buildBlackSun(radius: number): { group: THREE.Group; rays: THREE.Group; rayMats: THREE.MeshBasicMaterial[] } {
   const group = new THREE.Group();
 
   const coronaTex = canvasTexture(512, 512, (ctx) => {
@@ -511,6 +511,7 @@ export class IntroCutscene {
   private engineStopped = false;
   private skidAcc = 0;
   private engine: ReturnType<typeof synthAudio.startCarEngine> = null;
+  private engineClip: EndingClip | null = null;
   private heroWalkFrom = new THREE.Vector3();
 
   // Shot 1 set: outside highway, black sun, back light and darker sky (restored on the cut)
@@ -561,8 +562,8 @@ export class IntroCutscene {
     host.hero.visible = false;
     host.setFade(1);
     host.setLetterbox(0);
-    this.engine = synthAudio.startCarEngine();
-    this.engine?.setSpeed(1);
+    // the Mustang: the recorded engine, start to finish (it's as long as the cutscene)
+    this.engineClip = synthAudio.playEndingSample('carEngine', 1);
   }
 
   /** Ignore skip input for the first instant (the key that started the run must not skip it). */
@@ -647,7 +648,7 @@ export class IntroCutscene {
         this.host.fx.splatter(v.x, v.z, 1, (v.z - PASS_LANE_Z) * 0.4, 1.9);
         this.trauma = Math.min(1, this.trauma + 0.5);
         this.freeze = 0.05;
-        synthAudio.playCarImpact();
+        synthAudio.playEndingSample('carImpact', 0.95);
         if (standing.length === 1) this.host.slowMo(0.9); // last one in slow motion
       }
     }
@@ -770,7 +771,7 @@ export class IntroCutscene {
 
       if (!this.engineStopped && t >= T.kick + 0.35) {
         this.engineStopped = true;
-        this.engine?.stop(0.8);
+        this.engineClip?.(0.8);
       }
 
       // Driver steps out toward the fight
@@ -819,7 +820,7 @@ export class IntroCutscene {
     this.host.setLetterbox(0);
     if (!this.engineStopped) {
       this.engineStopped = true;
-      this.engine?.stop(0.3);
+      this.engineClip?.(0.3);
     }
   }
 }

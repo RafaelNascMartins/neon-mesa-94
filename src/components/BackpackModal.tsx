@@ -124,7 +124,7 @@ export function BackpackModal({ state, getTemplate, onClose }: BackpackModalProp
                       data-active={isSel({ kind: 'weapon', id: w.id })}
                       className="px-card vm-card flex flex-col items-center gap-1.5 p-2.5 text-center"
                     >
-                      <WeaponIcon weapon={w.id} className="w-24 h-12" />
+                      <WeaponIcon weapon={w.id} empty={w.ammo <= 0} className="w-24 h-12" />
                       <span className="text-[14px] leading-none uppercase px-shadow">
                         {WEAPONS[w.id].shortName}
                         {w.active ? ' ◂' : ''}

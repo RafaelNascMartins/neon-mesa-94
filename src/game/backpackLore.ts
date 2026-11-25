@@ -75,8 +75,16 @@ export const WEAPON_LORE: Record<WeaponId, { what: string; joke: string }> = {
     joke: 'A coletânea "Hits do Deserto 1994". Ninguém aguentava ouvir, então virou munição.',
   },
   corrente: {
-    what: 'Um raio que acerta o inimigo mais perto da mira e pula pra até 4 outros por perto.',
+    what: 'Segure: depois de uma carguinha sai um raio grosso e contínuo que liga até 4 inimigos e vai queimando todos enquanto a carga durar.',
     joke: 'Um vírus de corrente: "repasse pra 5 inimigos ou morra". Funciona.',
+  },
+  besta: {
+    what: 'Um virote pesado por vez. Demora pra recarregar, mas quem leva é arremessado pra trás.',
+    joke: 'Tecnologia medieval com manivela industrial. O melhor dos dois mundos ruins.',
+  },
+  arco: {
+    what: 'Segure por 1 segundo até o chão tremer em volta de você. Solte: a flecha atravessa tudo na linha.',
+    joke: 'Paciência é uma virtude. Um segundo de virtude, no caso.',
   },
   rmrf: {
     what: 'Apaga tudo numa faixa da tela. Custa 1 de integridade.',
@@ -85,6 +93,7 @@ export const WEAPON_LORE: Record<WeaponId, { what: string; joke: string }> = {
 };
 
 export const ITEM_LORE: Partial<Record<VmItemId, string>> = {
+  willow: 'Na prática não defende nada, mas é bom ter ele ativo.',
   cell: 'Uma pilha AA a mais no peito. Não pergunte de qual controle remoto ela saiu.',
   heatsink: 'Um cooler de PC colado com chiclete de menta. A menta ajuda. Cientificamente.',
   overclock: 'Suas pernas rodam acima da frequência recomendada pelo fabricante. O fabricante faliu.',

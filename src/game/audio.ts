@@ -93,7 +93,7 @@ const ODIO_LOOP = { start: 2.505, end: 6.451 };
 /** A playing ending clip: call it to stop (with a fade); `fadeTo` glides its volume. */
 export type EndingClip = ((fadeSec?: number) => void) & { fadeTo(gain: number, sec: number): void };
 
-export type EndingSample = 'cowboyTalk' | 'pcReboot' | 'pcBootUp' | 'maskFall' | 'chomp' | 'finalScene' | 'deathShatter' | 'youDied';
+export type EndingSample = 'cowboyTalk' | 'pcReboot' | 'pcBootUp' | 'maskFall' | 'chomp' | 'finalScene' | 'deathShatter' | 'youDied' | 'carEngine' | 'carImpact' | 'torch' | 'judge' | 'pistol' | 'judgeShot' | 'bossSteps' | 'shotgunShot' | 'shotgunRack' | 'coiceShot' | 'crossbow' | 'health' | 'gate' | 'bazooka' | 'slash1' | 'slash2' | 'nails' | 'hammerHit' | 'hammerWhiff';
 const ENDING_SAMPLE_URLS: Record<EndingSample, string> = {
   cowboyTalk: `${ASSET_BASE}cowboy_falando.mp3`,
   pcReboot: `${ASSET_BASE}pc_reiniciando.mp3`,
@@ -103,7 +103,28 @@ const ENDING_SAMPLE_URLS: Record<EndingSample, string> = {
   finalScene: `${ASSET_BASE}final_scene.mp3`,
   deathShatter: `${ASSET_BASE}morte.mp3`, // glass breaking: the player dies
   youDied: `${ASSET_BASE}youdied.mp3`, // the death screen's music
+  carEngine: `${ASSET_BASE}car_engine.mp3`, // the Mustang in the opening (9.4 s, the whole cutscene)
+  carImpact: `${ASSET_BASE}cutscene_impact.mp3`, // a bandit going under the Mustang
+  torch: `${ASSET_BASE}ma%C3%A7arico.mp3`, // the Maçarico's roar, looped while the trigger is held
+  judge: `${ASSET_BASE}judge.mp3`, // the Juiz: every loaded round is ready
+  pistol: `${ASSET_BASE}pistola.mp3`, // the Peacemaker's shot
+  judgeShot: `${ASSET_BASE}judge_atirando.mp3`, // one of the Juiz's cocked rounds going off
+  bossSteps: `${ASSET_BASE}passos_cem_faces.mp3`, // Cem Faces' legs: 10 steps, one every 0.5 s
+  shotgunShot: `${ASSET_BASE}escopeta.mp3`,
+  shotgunRack: `${ASSET_BASE}escopeta_pickup_ou_equipando.mp3`, // picking up / equipping the shotgun
+  coiceShot: `${ASSET_BASE}coice.mp3`,
+  crossbow: `${ASSET_BASE}crossbow.mp3`,
+  health: `${ASSET_BASE}health_pickup.mp3`,
+  gate: `${ASSET_BASE}portao_fechando.mp3`, // the cemetery gate (closing and opening)
+  bazooka: `${ASSET_BASE}bazooka.mp3`, // only its first second is used (the rest is the blast)
+  slash1: `${ASSET_BASE}slash_1.mp3`,
+  slash2: `${ASSET_BASE}slash_2.mp3`,
+  nails: `${ASSET_BASE}arma_de_pregos.mp3`, // 8 takes of the nail gun, see NAIL_TAKES
+  hammerHit: `${ASSET_BASE}marreta.mp3`,
+  hammerWhiff: `${ASSET_BASE}marreta_swing_no_ar.mp3`,
 };
+/** Where each take of the nail gun starts in its clip (s). */
+const NAIL_TAKES = [0.7, 3.9, 6.4, 8.63, 9.99, 11.62, 13.19, 15.02];
 // The Frutiger Aero world after "trying another way": a sunny deep house loop
 const AERO_TRACK_URL = `${ASSET_BASE}aurec-deep-house-577898.mp3`;
 const VM_TRACK_URL = `${ASSET_BASE}VM/musinova-ambient-minimal-techno-background-drumless-ambient-loop-538527.mp3`;
@@ -291,6 +312,8 @@ class SynthAudioEngine {
   private achievementBuffer: AudioBuffer | null = null;
   private soulBuffers: Partial<Record<SoulSound, Promise<AudioBuffer>>> = {};
   private endingBuffers: Partial<Record<EndingSample, Promise<AudioBuffer>>> = {};
+  /** Which of the two recorded katana swings plays next. */
+  private slashAlt = false;
   private aeroTrackBuffer: AudioBuffer | null = null;
   private aeroTrackSource: AudioBufferSourceNode | null = null;
   private aeroTrackGain: GainNode | null = null;
@@ -654,14 +677,20 @@ class SynthAudioEngine {
    * Plays one of the ending clips (waits for it if it's still loading). With `loop` it repeats
    * until stopped. Returns a stop(fadeSec) handle.
    */
-  public playEndingSample(id: EndingSample, gain = 0.9, loop = false): EndingClip {
+  public playEndingSample(
+    id: EndingSample,
+    gain = 0.9,
+    loop = false,
+    /** rate: playback speed (pitch); offset/duration: play just a slice of the clip (s). */
+    opts: { rate?: number; offset?: number; duration?: number; quiet?: boolean; fadeAt?: number; fadeLen?: number } = {}
+  ): EndingClip {
     const ctx = this.muted ? null : this.ensureContext();
     const pending = this.endingBuffers[id];
     if (!ctx || !this.sfxGain || !pending) {
       console.warn(`[audio] "${id}" skipped: ${this.muted ? 'muted' : !ctx ? 'no context' : !pending ? 'clip not loading' : 'no bus'}`);
       return Object.assign(() => {}, { fadeTo: () => {} });
     }
-    console.info(`[audio] play "${id}" (context ${ctx.state})`);
+    if (!opts.quiet) console.info(`[audio] play "${id}" (context ${ctx.state})`);
     const out = this.sfxGain;
     let stopped = false;
     let node: { src: AudioBufferSourceNode; g: GainNode } | null = null;
@@ -671,11 +700,21 @@ class SynthAudioEngine {
         const src = ctx.createBufferSource();
         src.buffer = buf;
         src.loop = loop;
+        if (opts.rate) src.playbackRate.value = opts.rate;
         const g = ctx.createGain();
         g.gain.value = gain;
         src.connect(g);
         g.connect(out);
-        src.start();
+        if (opts.offset !== undefined || opts.duration !== undefined) src.start(0, opts.offset ?? 0, opts.duration);
+        else src.start();
+        if (opts.fadeAt !== undefined) {
+          // fade out from fadeAt over fadeLen and stop there (keeps a long clip from cutting off dead)
+          const t0 = ctx.currentTime + opts.fadeAt;
+          const len = opts.fadeLen ?? 0.4;
+          g.gain.setValueAtTime(gain, t0);
+          g.gain.linearRampToValueAtTime(0.0001, t0 + len);
+          src.stop(t0 + len + 0.02);
+        }
         node = { src, g };
       })
       .catch(() => {});
@@ -780,7 +819,8 @@ class SynthAudioEngine {
   // ───────────── Boss fight music ─────────────
 
   /** Main soundtrack fades out, Cem Faces' own track fades in (looping). */
-  public startBossMusic() {
+  /** `fadeIn`: seconds for his track to swell up from silence (the intro builds slowly). */
+  public startBossMusic(fadeIn = 1.4) {
     const ctx = this.ensureContext();
     if (!ctx || !this.mainMute || !this.bossTrackGain) return;
     const now = ctx.currentTime;
@@ -795,7 +835,13 @@ class SynthAudioEngine {
     this.bossTrackSource = src;
     this.bossTrackGain.gain.cancelScheduledValues(now);
     this.bossTrackGain.gain.setValueAtTime(0.0001, now);
-    this.bossTrackGain.gain.linearRampToValueAtTime(0.85, now + 1.4);
+    if (fadeIn > 3) {
+      // a crescendo: barely there for a while, then rising hard toward the turn
+      this.bossTrackGain.gain.linearRampToValueAtTime(0.12, now + fadeIn * 0.45);
+      this.bossTrackGain.gain.linearRampToValueAtTime(0.85, now + fadeIn);
+    } else {
+      this.bossTrackGain.gain.linearRampToValueAtTime(0.85, now + fadeIn);
+    }
   }
 
   /** After the fight: his track slowly sinks away and leaves silence (main stays muted). */
@@ -2011,6 +2057,66 @@ class SynthAudioEngine {
     src.stop(now + dur + 0.02);
   }
 
+  /**
+   * The crater shot's panels: a deep thump on each cut, lower every time the camera climbs the
+   * Tree (step 0..2); on the last one (step 3, the whole thing) it booms and rolls away in reverb.
+   */
+  public playTreeThump(step: number) {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+    const f = [118, 84, 58, 38][Math.max(0, Math.min(3, step))];
+    const last = step >= 3;
+    this.triggerPunchBody(now, f, f * 0.42, 0.45 + step * 0.18, 0.95);
+    this.noiseBurst(now, 0.35 + step * 0.15, 0.4, 'lowpass', 340 - step * 60, 70, { verb: last ? 0.95 : 0.2 });
+    if (last) {
+      // the boom rolling off the land: fading echoes, lower each time
+      for (let k = 1; k <= 4; k++) {
+        this.triggerPunchBody(now + k * 0.34, f * (1 - k * 0.06), f * 0.4, 0.5, 0.5 / k);
+        this.noiseBurst(now + k * 0.34, 0.6, 0.18 / k, 'lowpass', 220, 60, { verb: 0.95 });
+      }
+    }
+  }
+
+  /** Sledgehammer: the heavy crunch when it lands on something, the whoosh when it hits air. */
+  public playHammer(connected: boolean) {
+    if (this.muted) return;
+    if (connected) this.playEndingSample('hammerHit', 0.8, false, { quiet: true, fadeAt: 1.1, fadeLen: 0.5 });
+    else this.playEndingSample('hammerWhiff', 0.7, false, { quiet: true, rate: 0.95 + Math.random() * 0.1 });
+  }
+
+  /** Bomb fuse: a sharp electronic beep (k 0..1 — higher and more urgent near the end). */
+  public playBombBeep(k: number, last = false) {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain) return;
+    const now = ctx.currentTime;
+    const f = 1200 + k * 900;
+    this.whine(now, f, f, last ? 0.32 : 0.07, last ? 0.14 : 0.1, 'square');
+  }
+
+  /** Arco: the string being drawn — a slow wooden creak. */
+  public playBowDraw() {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+    for (let i = 0; i < 5; i++) this.noiseBurst(now + i * 0.32, 0.12, 0.08, 'bandpass', 420 + i * 60, 520 + i * 60, { q: 6 });
+    this.whine(now, 90, 130, 1.8, 0.03, 'triangle');
+  }
+
+  /** Arco fully drawn: a deep thump and the ground humming under the pressure. */
+  public playBowReady() {
+    if (this.muted) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+    this.triggerPunchBody(now, 110, 38, 0.4, 0.7);
+    this.noiseBurst(now, 0.5, 0.22, 'lowpass', 500, 120, { verb: 0.3 });
+    this.whine(now + 0.05, 1600, 2400, 0.35, 0.03, 'sine');
+  }
+
   public playShoot(weapon: WeaponId) {
     if (this.muted) return;
     const ctx = this.ensureContext();
@@ -2018,24 +2124,39 @@ class SynthAudioEngine {
     const now = ctx.currentTime;
     const pitchJitter = 0.94 + Math.random() * 0.12;
 
-    if (weapon === 'katana') {
-      // Fast blade swish with a faint steel ring
-      this.noiseBurst(now, 0.16, 0.3, 'bandpass', 1800 * pitchJitter, 6200, { q: 3 });
-      this.whine(now + 0.02, 2400 * pitchJitter, 3600, 0.12, 0.035, 'sine');
-      return;
+    // Recorded shots
+    const rec = (id: EndingSample, gain: number, o: { fadeAt?: number; fadeLen?: number; duration?: number; offset?: number } = {}) =>
+      this.playEndingSample(id, gain, false, { rate: pitchJitter, quiet: true, ...o });
+    if (weapon === 'shotgun') return void rec('shotgunShot', 0.6);
+    if (weapon === 'coice') return void rec('coiceShot', 0.65);
+    if (weapon === 'besta') return void rec('crossbow', 0.75);
+    // the clip opens on half a second of silence: start right at the launch, fade before the blast
+    if (weapon === 'rocket') return void rec('bazooka', 0.7, { offset: 0.48, fadeAt: 0.55, fadeLen: 0.35 });
+    if (weapon === 'nailgun') {
+      const at = NAIL_TAKES[Math.floor(Math.random() * NAIL_TAKES.length)];
+      return void rec('nails', 0.55, { offset: Math.max(0, at - 0.03), duration: 0.45 });
     }
-    if (weapon === 'hammer') {
-      // Heavy, slow air displacement
-      this.noiseBurst(now, 0.32, 0.34, 'bandpass', 260 * pitchJitter, 900, { q: 1.4 });
+    if (weapon === 'hammer') return; // its swing / hit are played when the blow resolves (playHammer)
+    if (weapon === 'katana') {
+      // two takes of the swing, alternating
+      this.slashAlt = !this.slashAlt;
+      return void rec(this.slashAlt ? 'slash1' : 'slash2', 0.55, { fadeAt: 0.5, fadeLen: 0.3 });
+    }
+
+    if (weapon === 'pistol' || weapon === 'pistols') {
+      // The recorded Peacemaker shot, pitched a hair each time so it never machine-guns
+      this.playEndingSample('pistol', weapon === 'pistols' ? 0.34 : 0.42, false, { rate: pitchJitter * (weapon === 'pistols' ? 1.06 : 1), quiet: true });
       return;
     }
 
-    if (weapon === 'nailgun') {
-      // Pneumatic "tchk": compressed-air hiss + a hard steel click
-      this.noiseBurst(now, 0.05, 0.32, 'highpass', 3800 * pitchJitter, 3800, { crush: true });
-      this.triggerPunchBody(now, 320 * pitchJitter, 90, 0.05, 0.3);
+    if (weapon === 'arco') {
+      // String snap + the arrow hissing away
+      this.whine(now, 320 * pitchJitter, 240, 0.25, 0.1, 'triangle');
+      this.noiseBurst(now, 0.06, 0.35, 'bandpass', 900, 500, { q: 3 });
+      this.noiseBurst(now + 0.02, 0.4, 0.18, 'highpass', 3800, 2200, { q: 0.8 });
       return;
     }
+
     if (weapon === 'dinamite') {
       // Underarm toss + the fuse starting to hiss
       this.noiseBurst(now, 0.18, 0.25, 'bandpass', 900 * pitchJitter, 300, { q: 1 });
@@ -2043,9 +2164,8 @@ class SynthAudioEngine {
       return;
     }
     if (weapon === 'macarico') {
-      // Roaring gas: low rumble + crackle, one short slice per tick
-      this.noiseBurst(now, 0.09, 0.16, 'lowpass', 900 * pitchJitter, 500, { verb: 0.1 });
-      if (Math.random() < 0.4) this.noiseBurst(now, 0.03, 0.08, 'bandpass', 2600, 1800, { q: 2, crush: true });
+      // The roar itself is the looped torch sample (engine); just the odd crackle on top
+      if (Math.random() < 0.25) this.noiseBurst(now, 0.03, 0.08, 'bandpass', 2600, 1800, { q: 2, crush: true });
       return;
     }
     if (weapon === 'disco') {
@@ -2076,13 +2196,6 @@ class SynthAudioEngine {
     }
 
     if (weapon === 'rmrf') return; // playRmRf handles it
-    if (weapon === 'coice') {
-      // Sawn-off double: a huge flat boom, no pump — just the slam
-      this.triggerPunchBody(now, 120 * pitchJitter, 26, 0.32, 1.0);
-      this.noiseBurst(now, 0.36, 0.9, 'lowpass', 4200, 180, { crush: true, verb: 0.28 });
-      this.noiseBurst(now, 0.06, 0.5, 'highpass', 3000, 3000, { crush: true });
-      return;
-    }
     if (weapon === 'juiz') {
       // Heavy-frame magnum crack
       this.triggerPunchBody(now, 165 * pitchJitter, 36, 0.14, 0.7);
@@ -2097,28 +2210,7 @@ class SynthAudioEngine {
       return;
     }
 
-    if (weapon === 'pistol' || weapon === 'pistols') {
-      // Snappy revolver punch: chest thump + crisp crack transient
-      this.triggerPunchBody(now, (weapon === 'pistols' ? 230 : 205) * pitchJitter, 42, 0.11, 0.56);
-      this.noiseBurst(now, 0.085, 0.46, 'bandpass', 2200, 2200, { crush: true, verb: 0.12 });
-    } else if (weapon === 'shotgun') {
-      // 12-gauge slam + blast + pump rack at +0.2s
-      this.triggerPunchBody(now, 175 * pitchJitter, 30, 0.24, 0.85);
-      this.noiseBurst(now, 0.28, 0.78, 'lowpass', 3400, 240, { crush: true, verb: 0.2 });
-
-      const rack = ctx.createOscillator();
-      const rG = ctx.createGain();
-      rack.type = 'square';
-      rack.frequency.setValueAtTime(640, now + 0.2);
-      rack.frequency.setValueAtTime(920, now + 0.26);
-      rG.gain.setValueAtTime(0.001, now);
-      rG.gain.setValueAtTime(0.16, now + 0.2);
-      rG.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
-      rack.connect(rG);
-      rG.connect(this.sfxGain);
-      rack.start(now + 0.19);
-      rack.stop(now + 0.33);
-    } else if (weapon === 'railgun') {
+    if (weapon === 'railgun') {
       // Sonic crack + sub slam + falling electromagnetic whine
       this.triggerPunchBody(now, 210 * pitchJitter, 24, 0.36, 0.95);
       this.noiseBurst(now, 0.55, 0.92, 'lowpass', 6800, 160, { crush: true, verb: 0.35 });
@@ -2493,6 +2585,11 @@ class SynthAudioEngine {
     const ctx = this.ensureContext();
     if (!ctx || !this.sfxGain) return;
     let t = ctx.currentTime;
+    if (weapon === 'shotgun' && kind !== 'swap') {
+      // the recorded rack: picking the shotgun up / pumping it ready
+      this.playEndingSample('shotgunRack', 0.7, false, { quiet: true });
+      return;
+    }
 
     if (kind === 'swap') {
       // Old weapon hits the ground
@@ -3067,15 +3164,7 @@ class SynthAudioEngine {
   /** Health pickup: heartbeat, rising restore chime and a breath of air. */
   public playHealthPickup() {
     if (this.muted) return;
-    const ctx = this.ensureContext();
-    if (!ctx || !this.sfxGain) return;
-    const now = ctx.currentTime;
-    this.triggerPunchBody(now, 92, 44, 0.11, 0.42);
-    this.triggerPunchBody(now + 0.18, 86, 42, 0.13, 0.36);
-    this.noiseBurst(now + 0.02, 0.36, 0.1, 'bandpass', 500, 2800, { q: 1.2, verb: 0.3 });
-    this.softBell(now + 0.06, 659.25, 0.11);
-    this.softBell(now + 0.17, 987.77, 0.11);
-    this.softBell(now + 0.28, 1318.5, 0.08);
+    this.playEndingSample('health', 0.7, false, { quiet: true });
   }
 
   public playUnlockFanfare() {
@@ -3281,6 +3370,12 @@ class SynthAudioEngine {
     };
     this.activeVoice = src;
     this.activeVoiceEndsAt = time + buf.duration;
+  }
+
+  /** The cemetery gate grinding shut / dragging open (the recorded gate, faded out after ~2.4 s). */
+  public playGate() {
+    if (this.muted) return;
+    this.playEndingSample('gate', 0.85, false, { quiet: true, fadeAt: 2.2, fadeLen: 0.6 });
   }
 
   public playGateClang() {

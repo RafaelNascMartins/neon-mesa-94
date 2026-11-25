@@ -1,5 +1,6 @@
 import { memo, type CSSProperties } from 'react';
 import { itemPixels } from '../game/itemSprites';
+import { renderWeaponIcon } from '../game/weaponIconRender';
 import type { VmItemId, WeaponId } from '../game/types';
 
 /**
@@ -130,7 +131,8 @@ export function DataTreeEmblem() {
  * Every weapon is authored as a 32x16 character grid (one char = one pixel) and rendered as
  * crisp SVG rects. A 1px dark outline is generated automatically around the silhouette, so all
  * icons share the same scale, facing (muzzle → right), outline weight and material palette.
- * Only the `a`/`A` pixels take the weapon's own accent colour, so the set reads as one family.
+ * Painted/metal pixels get a stable per-pixel wear (tone noise + rust specks) to match the 3D models;
+ * only the `a`/`A` pixels take the weapon's own accent colour.
  * Each weapon gets its own silhouette and uses the full height (drum, bell, keycap, diagonal blade...).
  * ------------------------------------------------------------------------------------------------ */
 
@@ -138,339 +140,371 @@ const SPRITE_W = 32;
 const SPRITE_H = 16;
 const OUTLINE_HEX = '#050507';
 
-// Clean shared palette; `a` and `A` are resolved per weapon.
+// Shared palette (matches the 3D models: worn paint, rust, iron, hazard stripes); `a`/`A` are per weapon.
 const BASE_PALETTE: Record<string, string> = {
-  M: '#eef0f4', // chrome highlight
-  m: '#9aa0ac', // steel
-  d: '#555a66', // gunmetal
-  k: '#2a2c34', // dark steel
-  W: '#c07a44', // wood highlight
-  w: '#7e4628', // wood
+  M: '#cfcfc8', // steel highlight
+  m: '#8a8a86', // steel
+  d: '#4a4744', // iron
+  k: '#2e2b2a', // dark iron
+  K: '#161414', // black
+  W: '#a8683a', // wood highlight
+  w: '#7a4426', // wood
+  j: '#8a3324', // wrapped cord
   s: '#d6dae2', // blade
   c: '#26262c', // rubber grip
-  b: '#efebe2', // white shell / bone
-  r: '#d8a640', // brass
-  x: '#6a7a48', // olive
+  b: '#d8cfbe', // white paint
+  B: '#f0ead8', // white paint highlight
+  n: '#c8b48a', // beige
+  r: '#c89a3a', // brass
+  o: '#d0702a', // orange paint
+  O: '#f0a050', // orange highlight
+  e: '#b8301e', // red paint
+  E: '#e05a3a', // red highlight
+  t: '#3a8a80', // teal paint
+  T: '#6ac0b0', // teal highlight
+  x: '#6a7a48', // olive paint
   y: '#f0bc22', // hazard yellow
+  Y: '#ffe070', // yellow highlight
+  R: '#8a4a1e', // rust
+  q: '#5a2a14', // dark rust / shadow slot
   X: '#ff2a1f', // red glow
+  g: '#5dff6a', // green glow
+  p: '#8a3ac8', // purple
+  P: '#d07aff', // purple glow
+  u: '#6ae8ff', // cyan glow
+  '1': '#c8b4ff',
+  '2': '#9fe8ff',
+  '3': '#b8ffd0',
+  '4': '#fff7b0',
+  '5': '#ffc8e8',
 };
 
+/** Paint and metal get pixel wear (tone noise + rust specks); glows, screens and blades stay clean. */
+const WORN = new Set('MmdkWwjbBnroOeEtTxyYcR'.split(''));
+
 const WEAPON_SPRITES: Record<WeaponId, string[]> = {
-  // Revolver: walnut grip, fluted cylinder, long chrome barrel with a red sight line
+  // Peacemaker: iron frame, cylinder with beige slashes, long barrel, red front sight
   pistol: grid([
     '',
     '',
     '',
-    '......kk',
-    '.....kdddkkkkkkkkkkkkkkkkkkkkkk',
-    '.....kdMMMMMMMMMMMMMMMMMMMMMMMMMk',
-    '....kddmmmmmmmmmmmmmmmmmmmmmmmmk',
-    '....kdmaAamdXXXXXXXXXXXXXXXXXXXk',
-    '....kdmAaAmdkkkkkkkkkkkkkkkkkk',
-    '....kddmmmdkk.k',
-    '...kWWkddddk.kk',
-    '...kWwwkkkk.k',
-    '..kWwwwk',
-    '..kWwwk',
-    '.kWwwwk',
-    '.kkkkk',
+    '..............................EE',
+    '...kk...kddddkMMMMMMMMMMMMMMMMMM',
+    '...kdk.kdnmmndmmmmmmmmmmmmmmmmmm',
+    '....kddddmnmmnddddddddddddddddk',
+    '....kddddnmmndk',
+    '.....kddddddddk',
+    '....wWkkd..dk',
+    '...wWwk.kddk',
+    '...wWwwk',
+    '..wWwwk',
+    '..wWwwwk',
+    '..kwwwk',
   ]),
-  // Pump shotgun: long walnut stock, receiver with a red shell window, ribbed pump
+  // Scattergun: rusted stock with a hazard butt plate, orange shroud with vent slots, ribbed pump
   shotgun: grid([
     '',
     '',
     '',
     '',
-    '..........kkkkkkkkkkkkkkkkkkkkkkk',
-    '.WWW......kdMMMMMMMMMMMMMMMMMMMMk',
-    'WWwwWWWWWkkddXXddmmmmmmmmmmmmmmmk',
-    'wwwwwwwwwwkddXXddkkkkkkkkkkkkkkk',
-    '.wwwwwwwwwkdddddkWWwWWwWWwkdddk',
-    '..wwww..kwwkkkkkkwWwWWwWWwkkkk',
-    '........kwwk.....kkkkkkkkk',
-    '.........kwwk',
-    '..........kk',
+    '.............OOOOOOOOOOOOOOOOOOO',
+    'yk.........ddoqooqooqooqooqooooo',
+    'kyRRRRRRRRRddooooooooooooooooooo',
+    'ykRRRqRRRRRdddmmmmmmmmmmmmmmmmmM',
+    'kyRRRRRRRRkdddkkkkkkkkkkkkkkkkkk',
+    'ykRRR....kdddkdmdmdmdmdmdm',
+    '.........kd..kdmdmdmdmdmdm',
+    '.........kkdk',
   ]),
-  // Plasma: rounded white shell, three glowing coil rings, battery cell
-  plasma: grid([
-    '',
-    '',
-    '..............bbbbbbbbbb',
-    '.............bMMMMMMMMMMb',
-    '...kk.......bbbbbbbbbbbaA.aA.aA',
-    '..kddkkkkkkbbbbbbbbbbbbAaAAaAAak',
-    '..kdddddddbbbbbbbbbbbbbAaAAaAAak',
-    '...kkkkkkkbbbbbbbbbbbbbaA.aA.aA',
-    '..........kbbbbaAbbbbbbbb',
-    '...........kcckaAk',
-    '...........kcck.kk',
-    '..........kccck',
-    '..........kcck',
-    '..........kkk',
-  ]),
-  // Railgun: two open chrome rails with green current between, capacitor drum, scope
-  railgun: grid([
-    '',
-    '',
-    '.........kkkkk',
-    '.........kdddk',
-    '.............MMMMMMMMMMMMMMMMMMM',
-    'kkkkkkkkkkdAaAdmmmmmmmmmmmmmmmmm',
-    'kdddddddddAaAadAAAAAAAAAAAAAAAAa',
-    'kkddkkkkkkdAaAdaaaaaaaaaaaaaaaaa',
-    '..kk...kcckaAadmmmmmmmmmmmmmmmmm',
-    '.......kcckkkkkMMMMMMMMMMMMMMMMM',
-    '.......kcck',
-    '......kccck',
-    '......kcck',
-    '......kkk',
-  ]),
-  // Rocket launcher: fat olive tube, yellow bands, red warhead peeking from the front
-  rocket: grid([
-    '',
-    '',
-    '...kkkkkkkkkkkkkkkkkkkkkkkkkk',
-    '..kxxxxyxxxxxxxxxxxxxyxxxxxxxk',
-    '.kxMMMyMMMMMMMMMMMMMyMMMMMMMMkX',
-    'kkxxxxyxxxxxxxxxxxxxyxxxxxxxxkXX',
-    'kkxxxxyxxxxxxxxxxxxxyxxxxxxxxkXX',
-    '.kxxxxyxxxxxxxxxxxxxyxxxxxxxxkX',
-    '..kxxxyxxxxxxxxxxxxxyxxxxxxxk',
-    '...kkkkkkkkkkkkkkkkkkkkkkkkk',
-    '.........kcck.....kdk',
-    '.........kcck.....kdk',
-    '........kccck.....kkk',
-    '........kcck',
-    '........kkk',
-  ]),
-  // Katana: long gently curved blade with a red edge, round brass guard, wrapped hilt (diagonal)
-  katana: grid([
-    '..............................Ms',
-    '...........................MMss',
-    '........................MMMssX',
-    '.....................MMMsssXX',
-    '..................MMMsssXXX',
-    '...............MMMsssXXX',
-    '............MMMsssXXX',
-    '..........rMsssXXX',
-    '.........rrrsXX',
-    '........rrrrr',
-    '.......kbckr',
-    '......kcbck',
-    '.....kbckb',
-    '....kcbck',
-    '...rrbck',
-    '...rrk',
-  ]),
-  // Sledgehammer: big round steel head with red-rimmed faces, long wooden handle
-  hammer: grid([
-    '',
-    '.......................kkkkk',
-    '.....................XkmmmmmkX',
-    '....................XkMMMMMMMkX',
-    '....................XkmmmmmmmkX',
-    'cccc.WWWWWWWWWWWWWWWdkmmmmmmmkdX',
-    'ccccwwwwwwwwwwwwwwwwdkmmmmmmmkdX',
-    'cccc.wwwwwwwwwwwwwwwdkdddddddkdX',
-    '....................XkdddddddkX',
-    '....................XkdddddddkX',
-    '.....................XkdddddkX',
-    '.......................kkkkk',
-  ]),
-  // Nail gun: chunky yellow body, black nose, nail strip slanting under, rubber handle
-  nailgun: grid([
-    '',
-    '',
-    '.......kkkkkkkkkkkkkk',
-    '......kyyyyyyyyyyyyyyk',
-    '......kyMMMMMMMMMMMMyk',
-    '......kyyyyyyyyyyyyyykkkkkkk',
-    '......kyyyyyyyyyyyyyykddddddkX',
-    '......kyyyyyyyyyyyyyykddddddkX',
-    '......kyyyyyyyyyyyyyykkkkkkk',
-    '.......kcckkkmmmmmmmk',
-    '.......kcck.kmmmmmmk',
-    '.......kcck..kmmmmk',
-    '......kccck...kmmk',
-    '......kcck',
-    '......kkk',
-  ]),
-  // Speargun: slim wooden barrel, red rubber bands, chrome shaft, single clean arrowhead, reel
-  harpoon: grid([
-    '',
-    '',
-    '',
-    '..........................MMk',
-    '.........................MMMMk',
-    '....kkkkkkkkkkkkkkkkkkkkMMMMMMk',
-    'WWWWWWWWWWXXXXXXXXXXmmmmmmmmMMMMk',
-    'wwwwwwwwwwwwwwwwwwwwwwwwwwwkMMk',
-    '.wwwwwwwkkkkXXXXXXXXkkkkkkk.Mk',
-    '......kcck.krrk',
-    '......kcck.krrk',
-    '.....kccck..kk',
-    '.....kcck',
-    '.....kkk',
-  ]),
-  // fork(): stubby launcher with a big revolving drum of green bomblets
-  forkbomb: grid([
-    '',
-    '..........kkkkkkkk',
-    '.........kddddddddk',
-    '........kdaAkdaAkdk',
-    '........kdAakdAakdkkkkkkkkkk',
-    '........kddddddddddddddddddkAa',
-    '......kkkdaAkdaAkdmmmmmmmmmkaA',
-    '......kddkAakdAakddddddddddkAa',
-    '......kddddddddddkkkkkkkkkk',
-    '.......kkkdaAkdaAk',
-    '.......kcckAakdAak',
-    '.......kcckddddddk',
-    '......kccckkkkkkk',
-    '......kcck',
-    '......kkk',
-  ]),
-  // Coice: two stubby sawn-off barrels, brass hinge, swept walnut grip
+  // Coice: red body with a red/white band, twin sawn-off barrels
   coice: grid([
     '',
     '',
     '',
     '',
-    '..........kkkkkkkkkkkkkkkk',
-    '.........kdMMMMMMMMMMMMMMMkX',
-    '.......kkkdmmmmmmmmmmmmmmmkX',
-    '......kWWkrkkkkkkkkkkkkkkkk',
-    '.....kWwwkrdMMMMMMMMMMMMMMMkX',
-    '....kWwwwkddmmmmmmmmmmmmmmmkX',
-    '...kWwwwk.kkkWWWWWWkkkkkkkk',
-    '..kWwwwk.....kkkkkk',
-    '.kWwwwk',
-    '.kwwwk',
-    '..kkk',
+    '.........EEEEEbebeMMMMMMMMMMMMM',
+    '..WW....eeeeeeebebmmmmmmmmmmmmmd',
+    '.wwWW...eeeeeeebebkkkkkkkkkkkkkk',
+    'wwwwwWWWeeeeeeebebMMMMMMMMMMMMM',
+    'wwwwwwwweeeeeeebebmmmmmmmmmmmmmd',
+    '.wwwwwwkeedd.dkebkkkkkkkkkkkkkk',
+    '......kkkd..dk',
+    '........kddk',
   ]),
-  // Juiz: a hand cannon — oversized brass drum, thick slab barrel with glowing vents, bone grip
+  // Starburst: orange tube with a beige stripe, flared muzzle with a checker ring, carry handle,
+  // yellow canister with hazard bands underneath
+  rocket: grid([
+    '',
+    '..........kkkkkk',
+    '..........k....k..........dddd',
+    '..OOOOOOOOOOOOOOOOOOOOOOOObKbKd',
+    '.dooooooonnoooooooooooooooKbKbdd',
+    'ddoooooooonnoooooooooooooobKbKdd',
+    'ddooooooooonnooooqqqqooooKbKbddd',
+    '.dooooooooooooooooooooooobKbKdd',
+    '..qqqqqqqqqqqqqqqqqqqqqqqKbKbd',
+    '.......kdk..yykyykyy......dddd',
+    '.......kdk..yyyyyyyy',
+    '.......kddk.ykkyykky',
+    '........kk..yyyyyyyy',
+  ]),
+  // Pregadeira: yellow tool body, hazard band, black nose, nail magazine
+  nailgun: grid([
+    '',
+    '',
+    '',
+    '....YYYYYYYYYYYYYYYYYY',
+    '...yyyyyyyyykykykykyyykkkkk',
+    '..yyyyyyyyyyykykykykyyykkkkkkkMM',
+    '..yyyyyyyyyykykykykyykkkkkkkkkmm',
+    '...yyyyyyyyyyyyyyyyyykkkkkk',
+    '....kk.cccyy..ddddddddd',
+    '.......cccy...mdmdmdmdm',
+    '.......ccck...ddddddddd',
+    '......ccck',
+    '......yyyy',
+  ]),
+  // Lança-CD: two-handed white launcher, rainbow disc on top, red >>> arrows, green LED, loop stock
+  disco: grid([
+    '',
+    '..........12345123',
+    '.........3451234512',
+    '........r23451k23451r',
+    '..bb....BBBBBBBBBBBBBBBBBBBBBBB',
+    '.b..b..bbbbbbbbbbbbbbbbbbbbbbbbk',
+    'b....bbbbeebbeebbeebbbbbbbbbbbkk',
+    'b....bbbbbeebbeebbeebbbbbbbbbgbk',
+    '.b..bbbbbeebbeebbeebbbbbbbbbbbkk',
+    '..bb..dddbbbbbbbbbbbbbbbbbbbbbk',
+    '.......kcck..........kcck',
+    '.......kcck..........kcck',
+    '........kk............kk',
+  ]),
+  // Canhão de Faces: a CRT on the front with the screaming green face, hazard band, checker
+  // panel, red/purple cables, loop stock
+  faces: grid([
+    '',
+    '....................dddddddddd',
+    '...................dkkkkkkkkkkd',
+    '...................dkggggggggkd',
+    '..mm.......yykyykydkgkkggkkgkd',
+    '.m..m...mmmmmmmmmmdkgkkggkkgkd',
+    'm....mmmmbKbKmmmmmdkggggggggkdM',
+    'm....mmmmKbKbmmmmmdkgggkkgggkdM',
+    '.m..mmmmmmmmmmmmmmdkkggkkggkkd',
+    '..mm..eeepppmmmmmmdkkkkkkkkkkd',
+    '.....e.kcck.pp.....dddddddddd',
+    '....e..kcck..p',
+    '........kk',
+  ]),
+  // fork(): olive body, process-tree screen, a ring of blocks round a brass hub, green orbs
+  forkbomb: grid([
+    '',
+    '.......................g..g',
+    '.....................kdk.kdk.g',
+    '...........kkkkk....kd....dk',
+    '..xx.......kgggk...kd.rrr.dkg',
+    '.x..x..xxxxkgkgkxxxxd.rmr.dk',
+    'x....xxxxxxkgggkxxxxd.rrr.dk',
+    'x....xxxxxxxxxxxxxxxkd....dk.g',
+    '.x..xxxxxxxxxxxxxxxxxkdk.kdk',
+    '..xx..dddxxxxxxxxxxxx..g..g',
+    '.......kcck.....kcck',
+    '.......kcck.....kcck',
+    '........kk.......kk',
+  ]),
+  // Revólver Juiz: white revolver, drum with red glow slots, red slashes, sheriff star on the grip
   juiz: grid([
     '',
     '',
-    '..........kkkkkkkkkkkkkkkkkkkkkk',
-    '.........kMMMMMMMMMMMMMMMMMMMMMk',
-    '.....kkkkkdmmXmmXmmXmmXmmmmmmmmk',
-    '....krrrrkdmmmmmmmmmmmmmmmmmmmmk',
-    '...krMrkrkddddddddddddddddddddk',
-    '...krrkrrkkkkkkkkkkkkkkkkkkkkk',
-    '...krkrrrkdk.k',
-    '....krrrrkdkk',
-    '....kbbkkddk',
-    '...kbbbbkk',
-    '...kbbbk',
-    '..kbbbbk',
-    '..kbbbk',
-    '..kkkk',
-  ]),
-  // Canhão de Faces: round dark breech with a red eye, ringed with tiny white masks, bell mouth
-  faces: grid([
     '',
-    '.........................kkkk',
-    '........................kddddkX',
-    '......kkkk......bb.....kdddddkX',
-    '....kkddddkk...bkkb...kddddddkX',
-    '...kddddddddkkkbbbbkkkdddddddkX',
-    '...kdXXdddddddmmmmmmmmmdddddddkX',
-    '...kdXXdddddddddddddddddddddddkX',
-    '...kddddddddkkkbbbbkkkdddddddkX',
-    '....kkddddkk...bkkb...kddddddkX',
-    '......kkcck.....bb.....kdddddkX',
-    '.......kcck.............kddddkX',
-    '......kccck..............kkkk',
-    '......kcck',
-    '......kkk',
+    '..............................ee',
+    '...kk...BBBBBBBBBBBBBBBBBBBBBBBB',
+    '...kbk.bddXdXdbbbbbebbebbebbbbbb',
+    '....kbbbdXdXdddbbbbbbbbbbbbbbbbk',
+    '....kbbbddddddkXkkkXkkkXkkkkkkk',
+    '.....kbbbbbbbbk',
+    '....bbekkb..bk',
+    '...beeek.kbbk',
+    '...bbebbk',
+    '..bbbbbk',
+    '..bbbbbbk',
+    '..kbbbbk',
   ]),
-  // rm -rf: sleek white wand, big red DELETE keycap on top, wide flat slot nozzle
+  // Sunfire: orange body with the sun emblem, violet plasma tube caged in orange rings, cyan cells
+  plasma: grid([
+    '',
+    '',
+    '..............o...o...o...o',
+    '....OOOOOOOOOoPoPPoPPoPPoPPoddd',
+    '...oooYoooooooupuuopuuopuuopuddd',
+    '..ooYYYoooooopPPPPoPPPPoPPPPomMm',
+    '..oooYooooooopPPPPoPPPPoPPPPomMm',
+    '...ooooooooooupuuopuuopuuopudddd',
+    '...ddddddddddoPoPPoPPoPPoPPoddd',
+    '....kk.kcck..o...o...o...o',
+    '.......kcck..uu.uu',
+    '.......kcck',
+    '........kk',
+  ]),
+  // Volt: white body with a checker panel, battery drum with hazard + brass bands, two prongs
+  // with green current between them
+  railgun: grid([
+    '',
+    '',
+    '',
+    '..........rrrrr.....dddddddddddyk',
+    '....bbbbbbkyykkbbbbdggggggggggykk',
+    '..bbbbbbbbkkyykbbbb....g..g...g',
+    '..bbKbKbbbkyykkbbbb..g..g..g..',
+    '..bbbKbKbbkkyykbbbb....g..g...g',
+    '...bbbbbbbkyykkbbbbdggggggggggykk',
+    '....kk.kckrrrrr....dddddddddddyk',
+    '.......kcck',
+    '........kk',
+  ]),
+  // Katana: wrapped hilt with dark diamonds, brass pommel, dark tsuba, gently curved blade
+  katana: grid([
+    '',
+    '',
+    '',
+    '',
+    '',
+    '..............kk..............MM',
+    '..............kk.........MMMMMss',
+    '.rjkjkjkjkjkj.kkMMMMMMMMMssssss',
+    'rrjjkjjkjjkjjkkkssssssssssssmm',
+    '.rjkjkjkjkjkj.kkmmmmmmmmmmm',
+    '..............kk',
+    '..............kk',
+  ]),
+  // Marreta: taped wooden handle, octagonal iron head with red faces and brass bands
+  hammer: grid([
+    '',
+    '.....................eeeeee',
+    '....................eEEEEEEe',
+    '....................dmmmmmmd',
+    '...................dmMMMMMMmd',
+    '...................rrrrrrrrrr',
+    '.wwWWnnwwWWwwnnwwWWdmmkkmmmmd',
+    '.wwwwnnwwwwwwnnwwwwdmmkkmmmmd',
+    '...................rrrrrrrrrr',
+    '...................dmmmmmmmmd',
+    '....................dddddddd',
+    '....................eEEEEEEe',
+    '.....................eeeeee',
+  ]),
+  // Arpão: teal body, rope reel on top, hazard band, rusted shaft with a barbed head
+  harpoon: grid([
+    '',
+    '',
+    '',
+    '..........nnnn',
+    '.........nWnnWn...........m',
+    '...TTTTTTnnnnnnTTTyky......mm',
+    '..tttttttnnnnnntttkykRRRRRRRmMMM',
+    'tttttttttttttttttyky.......mm',
+    'tt.tttttdkcckttttkyk.......m',
+    '.......kcck',
+    '.......kcck',
+    '........kk',
+  ]),
+  // rm -rf /: white box with black fins, hazard band, front frame with the red screen, red hose
   rmrf: grid([
-    '..........kkkkkkkk',
-    '.........kXXXXXXXXk',
-    '.........kXMMMMMMXk',
-    '.........kXXXXXXXXk',
-    '...........kkddkk..........kkkk',
-    '......kkkkkkkkkkkkkkkkkkk..kkdd',
-    '.....kbMMMMMMMMMMMMMMMMMbkkkdXX',
-    '....kbbbbbbbbbbbbbbbbbbbbbbddXX',
-    '....kXXXXXXXXXXXXXXXXXXXXbbddXX',
-    '.....kbbbbbbbbbbbbbbbbbbbkkkdXX',
-    '......kbbkkkkkkkkkkkkkkkk..kkdd',
-    '......kbbk.................kkkk',
-    '.....kbbbk',
-    '.....kbbk',
-    '.....kkk',
+    '',
+    '',
+    '.....kkkkkkk',
+    '....BBBBBBBBBBBBBByykyykdddddd',
+    '...bbkbkbkbkbbbbbbkyykydXXXXXd',
+    '..bbbkbkbkbkbbbbbbyykyykdXXXXXd',
+    '..bbbkbkbkbkbbbbbbkyykydXXXXXd',
+    '..bbbbbbbbbbbbbbbbyykyykdXXXXXd',
+    '..bbbbbbbbbbbbbbbbkyykydddddd',
+    '..eee.kcck.........ee',
+    '.e..e.kcck........e',
+    '.e...eekk......eee',
+    '..ee....eeeeee',
   ]),
-  // Dinamite: three red sticks bound with brass wire, a lit fuse fizzing at the top
+  // Dinamite: five sticks bound with iron straps, rope fuse, glowing tip
   dinamite: grid([
-    '..........................yXy',
-    '.........................XyX',
-    '........................k.y',
-    '.......................k',
-    '...kkkkkkkkkkkkkkkkkkkk',
-    '..kAAAAAAAAAAAAAAAAAAAAk',
-    '..kaaaaaarrraaaaaarrraak',
-    '..kkkkkkkrrrkkkkkkrrrkk',
-    '..kAAAAAAAAAAAAAAAAAAAAk',
-    '..kaaaaaarrraaaaaarrraak',
-    '..kkkkkkkrrrkkkkkkrrrkk',
-    '..kAAAAAAAAAAAAAAAAAAAAk',
-    '..kaaaaaarrraaaaaarrraak',
-    '...kkkkkkkkkkkkkkkkkkkk',
+    '.........................A',
+    '........................aXa',
+    '.......................n.A',
+    '....................nnn',
+    '...EEEdEEEEEEEEEdEEEEn',
+    '...eeedeeeeeeeeedeeee',
+    '..EEEEdEEEEEEEEEdEEEEE',
+    '..eeeedeeeeeeeeedeeeee',
+    '..EEEEdEEEEEEEEEdEEEEE',
+    '..eeeedeeeeeeeeedeeeee',
+    '..EEEEdEEEEEEEEEdEEEEE',
+    '..eeeedeeeeeeeeedeeeee',
+    '...EEEdEEEEEEEEEdEEEE',
+    '...eeedeeeeeeeeedeeee',
   ]),
-  // Maçarico: long nozzle with a pilot flame, fuel tank slung under, rubber grip
+  // Maçarico: orange body with a loop handle, white tank on top, bent nozzle, pilot flame
   macarico: grid([
     '',
-    '',
-    '',
-    '.......kkkkkkkkkkkkkkkkkkkk',
-    '......kdMMMMMMMMMMMMMMMMMMdk.yA',
-    '.....kddmmmmmmmmmmmmmmmmmmdkkyAa',
-    '.....kdddddddddddddddddddddk.aA',
-    '.....kkkkkkkkkkkkkkkkkkkkkk',
-    '......kcck..kaaaaaaaaaaak',
-    '......kcck.kaAAAAAAAAAAAak',
-    '.....kccck.kaaaaaaaaaaaaak',
-    '.....kcck...kaaaaaaaaaaak',
-    '.....kkk.....kkkkkkkkkkk',
+    '.......bbbb',
+    '......bBBBBb',
+    '......bbbbbb...................A',
+    '......bbbbbb................ddaA',
+    '..oo..bbbbbb...............dmda',
+    '.o..o.bbbbbbooooooooooddddddd',
+    'o....oOOOOOOOOOOOOOOOmmmmmmmm',
+    'o....oooooooooooooooomdddd',
+    '.o..ooooqqqqoooooooood',
+    '..oo..kcck..dd',
+    '......kcck..dd',
+    '.......kk',
   ]),
-  // Lança-CD: a chunky launcher with a big shiny disc loaded on top
-  disco: grid([
-    '',
-    '',
-    '...............kkkkkkkk',
-    '.............kkMMMMMMMMkk',
-    '............kMbbAbbbbbbMk',
-    '...kkkkkkkkkbbAkkkkbbbbbbk',
-    '..kddddddddkbAbkbbkbbbbbbk',
-    '..kdmmmmmmmkbbbkkkkbbbbbbk',
-    '..kddddddddkbbbbbbbbbbbAbk',
-    '...kkkcckkkkMbbbbbbbbbAbk',
-    '.....kcck....kkbbbbbbbbkk',
-    '.....kcck......kkkkkkkk',
-    '....kccck',
-    '....kcck',
-    '....kkk',
-  ]),
-  // Corrente.exe: coil gun with a glowing cell, a zigzag of lightning leaping off the front
+  // Corrente.exe: dark body with a purple vent, purple coil with brass rings, white claws, arc + orb
   corrente: grid([
     '',
+    '...........................bb',
+    '.........................bb.P',
+    '.....dddddddd..rprprprbbbb..pP',
+    '...ddddppppddddrprprprbbbBb.PPP',
+    '..dddddPPPPddddrPrPrPrbbbbb.pPPp',
+    '..dddddppppddddrprprprbbbBb.PPP',
+    '...dddddddddddddrprprprbbbb..pP',
+    '...ee..kcck..........bb.P',
+    '..e..e.kcck............bb',
+    '..e...eekk',
+  ]),
+  // Besta: wooden stock, iron tiller, wide steel limbs across the front, crank and a loaded bolt
+  besta: grid([
     '',
-    '..........kk',
-    '.........kAak',
-    '.........kaAk.................A',
-    '......kkkkkkkkkkkkkkk........A.A',
-    '.....kddddrrrrrrrdddk..A....A',
-    '.....kdmmmrMrMrMrmmmkkA.A..A',
-    '.....kddddrrrrrrrdddk...A.A',
-    '......kkkkkkkkkkkkkkk....A',
-    '.......kcck',
-    '.......kcck',
-    '......kccck',
-    '......kcck',
-    '......kkk',
+    '.......................mm',
+    '......................mMd',
+    '.....................mMd',
+    '.....................Md',
+    '..WW.......kdk......kd',
+    '.wwWWWWWWWWWWWWWWWWWWWWWWnnnnmMM',
+    'wwwwwwwwwwwwwwwwwwwkkkkkkkkkkk',
+    '.wwwwwwwkddkwwwwwwwwkd',
+    '..ww....kddk........Md',
+    '........kcck........mMd',
+    '........kcck.........mMd',
+    '.........kk...........mm',
+  ]),
+  // Arco: wrapped grip, two curved limbs, the string pulled to the arrow's nock
+  arco: grid([
+    '..............ww',
+    '...............wW',
+    '................wW',
+    '.................wW',
+    '..................ww',
+    '..................ww',
+    'nnK........b......jj.........M',
+    'bbbmmmmmmmmmmmmmmmjjmmmmmmmmmMMM',
+    'nnK........b......jj.........M',
+    '..................ww',
+    '..................ww',
+    '.................wW',
+    '................wW',
+    '...............wW',
+    '..............ww',
   ]),
   pistols: [],
 };
@@ -515,7 +549,22 @@ function buildSpriteRuns(grid: readonly string[], accent: string, accentHi: stri
   const cached = spriteCache.get(key);
   if (cached) return cached;
 
-  const palette: Record<string, string> = { ...BASE_PALETTE, a: accent, A: accentHi, K: '#121318' };
+  const palette: Record<string, string> = { ...BASE_PALETTE, a: accent, A: accentHi };
+  let seed = 7;
+  for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) >>> 0;
+  /** Worn pixel: per-pixel tone noise and the odd rust speck, stable per weapon. */
+  const wear = (ch: string, x: number, y: number) => {
+    const base = palette[ch];
+    if (!WORN.has(ch)) return base;
+    let h = (seed ^ Math.imul(x + 11, 73856093) ^ Math.imul(y + 5, 19349663)) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822519) >>> 0;
+    const r = (h & 0xffff) / 0xffff;
+    if (r < 0.06 && ch !== 'R' && ch !== 'k' && ch !== 'c') return r < 0.025 ? '#4a2412' : '#8a4a1e';
+    const k = 0.9 + ((h >>> 16) & 0xff) / 255 * 0.18;
+    const n = parseInt(base.slice(1), 16);
+    const c = (v: number) => Math.min(255, Math.round(v * k));
+    return `rgb(${c((n >> 16) & 255)},${c((n >> 8) & 255)},${c(n & 255)})`;
+  };
   const filled = (x: number, y: number) => {
     if (y < 0 || y >= SPRITE_H || x < 0 || x >= SPRITE_W) return false;
     const ch = grid[y]?.[x];
@@ -528,7 +577,7 @@ function buildSpriteRuns(grid: readonly string[], accent: string, accentHi: stri
     const row: (string | null)[] = [];
     for (let x = -1; x <= SPRITE_W; x++) {
       if (filled(x, y)) {
-        row.push(palette[grid[y][x]]);
+        row.push(wear(grid[y][x], x, y));
       } else if (filled(x - 1, y) || filled(x + 1, y) || filled(x, y - 1) || filled(x, y + 1)) {
         row.push(OUTLINE_HEX);
       } else {
@@ -561,37 +610,47 @@ function buildSpriteRuns(grid: readonly string[], accent: string, accentHi: stri
 const WEAPON_ACCENTS: Record<WeaponId, [string, string]> = {
   pistol: ['#ff2a1f', '#ffb0a0'],
   pistols: ['#ff2a1f', '#ffb0a0'],
-  shotgun: ['#ff2a1f', '#ffb0a0'],
-  plasma: ['#1fb8c9', '#bff8ff'],
-  railgun: ['#8fd11f', '#eaffc2'],
-  rocket: ['#ff2a1f', '#ffb0a0'],
+  shotgun: ['#ff7a2a', '#ffd0a0'],
+  plasma: ['#c05aff', '#6ae8ff'],
+  railgun: ['#5dff6a', '#eaffc2'],
+  rocket: ['#ff7a2a', '#ffe08a'],
   katana: ['#4e5057', '#9a9ca3'],
   hammer: ['#ff2a1f', '#ffb0a0'],
-  nailgun: ['#c8902a', '#ffd27a'],
-  harpoon: ['#8a7048', '#d0b080'],
+  nailgun: ['#f0bc22', '#ffe070'],
+  harpoon: ['#3a8a80', '#6ac0b0'],
   forkbomb: ['#3fd96a', '#d8ffe0'],
   coice: ['#ff2a1f', '#ffb0a0'],
-  juiz: ['#c8902a', '#ffd27a'],
-  faces: ['#ff1e3c', '#ffffff'],
+  juiz: ['#ff2a1f', '#ffb0a0'],
+  faces: ['#5dff6a', '#ffffff'],
   rmrf: ['#ff2030', '#ffffff'],
-  dinamite: ['#e0281e', '#ff8a6a'],
+  dinamite: ['#ff8a1a', '#ffe08a'],
   macarico: ['#ff8a1a', '#ffe08a'],
   disco: ['#ff5ac8', '#7fe8ff'],
-  corrente: ['#2ee6ff', '#e8ffff'],
+  corrente: ['#c05aff', '#f0d8ff'],
+  besta: ['#c89a3a', '#ffe08a'],
+  arco: ['#f0ead8', '#ffffff'],
 };
 
 export const WeaponIcon = memo(function WeaponIcon({
   weapon,
   className = 'w-11 h-7',
   dimmed = false,
+  empty = false,
 }: {
   weapon: WeaponId;
   className?: string;
   dimmed?: boolean;
+  /** Out of ammo: stays in the inventory, switched off. */
+  empty?: boolean;
 }) {
   const [accent, accentHi] = WEAPON_ACCENTS[weapon];
-  const style = dimmed ? { filter: 'grayscale(0.85) brightness(0.7)' } : undefined;
-  const src = spriteUrl('weapon:' + weapon, [-1, -1, 34, 18], () => {
+  const style = empty
+    ? { filter: 'grayscale(1) brightness(0.32)', opacity: 0.75 }
+    : dimmed
+      ? { filter: 'grayscale(0.85) brightness(0.7)' }
+      : undefined;
+  // Rendered from the 3D model (64×32 pixel art); the hand-drawn 32×16 sprite if WebGL fails
+  const src = renderWeaponIcon(weapon) ?? spriteUrl('weapon:' + weapon, [-1, -1, 34, 18], () => {
     if (weapon === 'pistols') {
       const runs = buildSpriteRuns(WEAPON_SPRITES.pistol, accent, accentHi, 'pistol');
       return [

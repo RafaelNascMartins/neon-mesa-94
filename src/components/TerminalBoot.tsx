@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { synthAudio } from '../game/audio';
+import { DispatchAscii } from './DispatchAscii';
 
 /**
  * Boot sequence shown when a run starts from the title: a terminal session where the driver
  * — right now, out on the highway in the Mustang — hops from folder to folder, gets refused
- * at /DataTree, and someone opens `vim run.sh` to edit their way in. `:wq` drops into the game.
+ * at /DataTree, and someone opens `vim run.sh` to edit their way in. `:wq`, `./run.sh`: under
+ * the code, a small Mustang drawn in code drives toward the Tree (the cowboy being dispatched);
+ * as it gets close, the screen cuts to the game (and its opening cutscene).
  */
 
 type Step =
@@ -13,6 +16,8 @@ type Step =
   | { kind: 'pause'; ms: number }
   | { kind: 'vim' }
   | { kind: 'vimType'; text: string }
+  | { kind: 'vimQuit' }
+  | { kind: 'dispatch' }
   | { kind: 'end' };
 
 const P = (cwd: string) => `drifter@mustang:${cwd}$ `;
@@ -39,6 +44,10 @@ const SCRIPT: Step[] = [
   { kind: 'pause', ms: 700 },
   { kind: 'vimType', text: ':wq' },
   { kind: 'pause', ms: 380 },
+  { kind: 'vimQuit' },
+  { kind: 'cmd', prompt: P('/wasteland/desert/motel'), text: './run.sh' },
+  { kind: 'out', text: '[  OK  ] antivirus.exe dispatched → /DataTree', delay: 220 },
+  { kind: 'dispatch' },
   { kind: 'end' },
 ];
 
@@ -59,6 +68,9 @@ export function TerminalBoot({ onDone }: TerminalBootProps) {
   const [vim, setVim] = useState(false);
   const [vimStatus, setVimStatus] = useState('"~/run.sh" 4L, 77B');
   const [glitch, setGlitch] = useState(false);
+  // the Mustang in code, driving into the Tree (resolves when it's through the door)
+  const [dispatching, setDispatching] = useState(false);
+  const dispatchDone = useRef<(() => void) | null>(null);
   const doneRef = useRef(false);
 
   const finish = () => {
@@ -100,6 +112,14 @@ export function TerminalBoot({ onDone }: TerminalBootProps) {
         } else if (step.kind === 'vimType') {
           await typeOut('', step.text, () => undefined);
           setVimStatus('"~/run.sh" 4L, 77B written');
+        } else if (step.kind === 'vimQuit') {
+          setVim(false);
+        } else if (step.kind === 'dispatch') {
+          // (silent: the real engine roars right after, in the opening cutscene)
+          await new Promise<void>((resolve) => {
+            dispatchDone.current = resolve;
+            setDispatching(true);
+          });
         } else if (step.kind === 'end') {
           setGlitch(true);
           synthAudio.playCrtGlitch();
@@ -110,6 +130,7 @@ export function TerminalBoot({ onDone }: TerminalBootProps) {
     })();
     return () => {
       cancelled = true;
+      dispatchDone.current?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -154,10 +175,14 @@ export function TerminalBoot({ onDone }: TerminalBootProps) {
                 {l || ' '}
               </div>
             ))}
-            <div className="whitespace-pre-wrap">
-              {typing}
-              <span className="inline-block w-[0.6em] h-[1.1em] align-[-0.15em] bg-[#e9e4d8] hud-pulse" />
-            </div>
+            {dispatching ? (
+              <DispatchAscii onDone={() => dispatchDone.current?.()} />
+            ) : (
+              <div className="whitespace-pre-wrap">
+                {typing}
+                <span className="inline-block w-[0.6em] h-[1.1em] align-[-0.15em] bg-[#e9e4d8] hud-pulse" />
+              </div>
+            )}
           </>
         ) : (
           <div className="flex flex-col h-full">

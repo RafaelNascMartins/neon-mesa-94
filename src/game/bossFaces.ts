@@ -7,7 +7,7 @@ import * as THREE from 'three';
  *   fight 2: the screens that survived go deranged (stitched grin, crying blood, X-eyes)
  */
 
-export type FaceMood = 'rage' | 'laugh' | 'cry' | 'scream' | 'stitched' | 'bleeding' | 'dead' | 'error';
+export type FaceMood = 'rage' | 'laugh' | 'cry' | 'scream' | 'stitched' | 'bleeding' | 'dead' | 'error' | 'horror' | 'static';
 
 const cache = new Map<FaceMood, THREE.CanvasTexture>();
 
@@ -113,6 +113,37 @@ function faceTexture(mood: FaceMood): THREE.CanvasTexture {
       line(K, [[39, 17], [29, 27]], 3);
       line(K, [[14, 45], [34, 45]], 2);
       px(RED, 28, 46, 4, 6);
+      break;
+    case 'horror': {
+      // The locked face: hollow black eyes far too big with red pinpricks, the mouth torn open
+      // ear to ear on jagged teeth, cracks running out of it
+      px(K, 7, 15, 13, 13);
+      px(K, 28, 15, 13, 13);
+      px(K, 9, 13, 9, 2);
+      px(K, 30, 13, 9, 2);
+      px(RED, 12, 20, 3, 3);
+      px(RED, 33, 20, 3, 3);
+      px('#ff8a8a', 13, 20, 1, 1);
+      px('#ff8a8a', 34, 20, 1, 1);
+      px(K, 4, 37, 40, 15);
+      px(K, 2, 34, 4, 5);
+      px(K, 42, 34, 4, 5);
+      for (let t = 6; t < 43; t += 4) {
+        px('#f2eee6', t, 37, 2, 4);
+        px('#f2eee6', t + 2, 48, 2, 4);
+      }
+      line('#3a3a3a', [[24, 0], [22, 9], [25, 14]], 1);
+      line('#3a3a3a', [[46, 30], [40, 33]], 1);
+      line(RED, [[14, 28], [13, 33]], 1);
+      line(RED, [[34, 28], [35, 34]], 1);
+      break;
+    }
+    case 'static':
+      for (let yy = 0; yy < H; yy += 2)
+        for (let xx = 0; xx < W; xx += 2) {
+          const v = Math.floor(Math.random() * 200);
+          px(`rgb(${v},${v},${v})`, xx, yy, 2, 2);
+        }
       break;
     case 'error':
       x.fillStyle = K;

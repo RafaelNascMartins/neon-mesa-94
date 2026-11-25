@@ -478,31 +478,41 @@ export function acquireOrSwapWeapon(
   };
 }
 
+/**
+ * Empty guns stay in the inventory (greyed out) so an ammo box can bring them back. If the active
+ * one runs dry we move to one that still has ammo; only when *nothing* can fire does the pistol
+ * come back, taking the empty active gun's slot — that gun is handed back as `dropped` (left on
+ * the floor, never destroyed).
+ */
 export function ensureUsableWeapon(
   ownedWeapons: readonly WeaponId[],
   activeWeapon: WeaponId,
   ammo: Record<WeaponId, number>
-): { ownedWeapons: WeaponId[]; activeWeapon: WeaponId; ammo: Record<WeaponId, number>; restoredPistol: boolean } {
+): {
+  ownedWeapons: WeaponId[];
+  activeWeapon: WeaponId;
+  ammo: Record<WeaponId, number>;
+  restoredPistol: boolean;
+  dropped: WeaponId | null;
+} {
   const nextAmmo = { ...ammo };
-  const kept = ownedWeapons.filter((wId) => wId === 'pistol' || (nextAmmo[wId] ?? 0) > 0);
+  const usable = (w: WeaponId) => w === 'pistol' || (nextAmmo[w] ?? 0) > 0;
+  const owned = [...ownedWeapons];
 
-  if (kept.length === 0) {
-    nextAmmo.pistol = Infinity;
-    return {
-      ownedWeapons: ['pistol'],
-      activeWeapon: 'pistol',
-      ammo: nextAmmo,
-      restoredPistol: true,
-    };
+  if (owned.length > 0 && usable(activeWeapon) && owned.includes(activeWeapon)) {
+    return { ownedWeapons: owned, activeWeapon, ammo: nextAmmo, restoredPistol: false, dropped: null };
   }
+  const other = owned.find(usable);
+  if (other) return { ownedWeapons: owned, activeWeapon: other, ammo: nextAmmo, restoredPistol: false, dropped: null };
 
-  const nextActive = kept.includes(activeWeapon) ? activeWeapon : kept[0];
-  return {
-    ownedWeapons: kept,
-    activeWeapon: nextActive,
-    ammo: nextAmmo,
-    restoredPistol: false,
-  };
+  nextAmmo.pistol = Infinity;
+  if (owned.length === 0) {
+    return { ownedWeapons: ['pistol'], activeWeapon: 'pistol', ammo: nextAmmo, restoredPistol: true, dropped: null };
+  }
+  const idx = Math.max(0, owned.indexOf(activeWeapon));
+  const dropped = owned[idx];
+  owned[idx] = 'pistol';
+  return { ownedWeapons: owned, activeWeapon: 'pistol', ammo: nextAmmo, restoredPistol: true, dropped };
 }
 
 export function normalizeLeaderboardName(raw: string): string | null {
